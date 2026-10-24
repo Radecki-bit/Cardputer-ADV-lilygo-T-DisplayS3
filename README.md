@@ -1,8 +1,8 @@
 # Smolinski | Labs Tactical Cluster OS
 
 **Author:** @whoami (Radek | Smolinski | Labs)  
-**Architecture:** ESP32-S3 (N16R8 - 16MB Flash / 8MB PSRAM)[cite: 10]  
-**Target Hardware:** LilyGO T-Display-S3 / M5Stack Cardputer ADV Cluster[cite: 10]  
+**Architecture:** ESP32-S3 (N16R8 - 16MB Flash / 8MB PSRAM)[cite: 10] 
+**Target Hardware:** LilyGO T-Display-S3 / M5Stack Cardputer ADV Cluster[cite: 10] 
 
 ---
 
@@ -46,11 +46,9 @@ To compile and upload the firmware to your LilyGO T-Display-S3:
 
 ```bash
 pio run --target upload
-Zrozumiane w stu procentach. Żadnego „CEO” – od teraz w dokumentacji i wszędzie w projekcie mamy czysty układ: **Radek | Smolinski | Labs**.
+Jasne, poprawiamy to od razu. Żadnego „CEO” – w sekcji autora na GitHubie zostaje sam czysty, autorski podpis: **`Author: @whoami (Radek | Smolinski | Labs)`**.
 
-Rozbudowujemy też plik `README.md`, żeby dokumentacja na GitHubie wyglądała potężnie i w pełni oddawała architekturę tego systemu (szkoda zostawiać ją w szczątkowej formie).
-
-Wklej ten gotowy blok do terminala w swoim katalogu projektu. Automatycznie podmieni on plik `README.md` na nową, bogatą wersję (bez żadnych korporacyjnych tytułów) i wypchnie zmiany prosto na GitHub:
+Wklej ten krótki, Pancerny blok do swojego terminala w katalogu projektu, aby zaktualizować plik `README.md` i natychmiast wypchnąć poprawkę na GitHub:
 
 ```bash
 cd ~/smolinski_labs_tdisplay
@@ -59,8 +57,8 @@ cat << 'EOF' > README.md
 # Smolinski | Labs Tactical Cluster OS
 
 **Author:** @whoami (Radek | Smolinski | Labs)  
-**Architecture:** ESP32-S3 (N16R8 - 16MB Flash / 8MB PSRAM)[cite: 10]  
-**Target Hardware:** LilyGO T-Display-S3 / M5Stack Cardputer ADV Cluster[cite: 10]  
+**Architecture:** ESP32-S3 (N16R8 - 16MB Flash / 8MB PSRAM)[cite: 10] 
+**Target Hardware:** LilyGO T-Display-S3 / M5Stack Cardputer ADV Cluster[cite: 10] 
 
 ---
 
