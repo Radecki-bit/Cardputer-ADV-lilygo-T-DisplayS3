@@ -2,16 +2,16 @@ import math
 
 W, H = 70, 61
 
-# Pary gradientów CyberNeon (R, G, B) dla 8 modułów
+# Podkręcone, maksymalnie nasycone palety CyberNeon (R, G, B)
 PALETTES = [
-    ((0, 245, 255), (230, 0, 255)),   # 0: WIFI (Cyjan -> Fiolet/Magenta)
-    ((130, 255, 20), (0, 230, 255)),  # 1: BT (Neon Green -> Cyjan)
-    ((255, 0, 140), (255, 190, 0)),   # 2: MESH (Magenta -> Złoto)
-    ((0, 240, 255), (255, 30, 160)),  # 3: GEM (Cyjan -> Hot Pink)
-    ((255, 215, 0), (255, 0, 130)),   # 4: MPY (Złoto -> Magenta)
-    ((170, 50, 255), (0, 255, 210)),  # 5: FLASH (Fiolet -> Turkus)
-    ((255, 170, 0), (0, 235, 255)),   # 6: OTA (Pomarańcz -> Cyjan)
-    ((255, 0, 160), (0, 245, 255))    # 7: SET (Magenta -> Cyjan)
+    ((0, 255, 255), (255, 0, 255)),    # 0: WIFI (Electric Cyan -> Neon Magenta)
+    ((140, 255, 0), (0, 255, 255)),    # 1: BT (Acid Green -> Cyan)
+    ((255, 0, 150), (255, 210, 0)),    # 2: MESH (Hot Pink -> Cyber Gold)
+    ((0, 255, 255), (255, 20, 170)),   # 3: GEM (Cyan -> Laser Pink)
+    ((255, 230, 0), (255, 0, 140)),    # 4: MPY (Neon Yellow -> Magenta)
+    ((190, 40, 255), (0, 255, 220)),   # 5: FLASH (Ultraviolet -> Aqua Neon)
+    ((255, 160, 0), (0, 250, 255)),    # 6: OTA (Neon Orange -> Cyan)
+    ((255, 0, 180), (0, 255, 255))     # 7: SET (Magenta -> Electric Cyan)
 ]
 
 BAYER = ((0, 2), (3, 1))
@@ -34,10 +34,10 @@ def sd_round_box(px, py, cx, cy, bx, by, r):
     return math.hypot(max(qx, 0.0), max(qy, 0.0)) + min(max(qx, qy), 0.0) - r
 
 def sd_icon(idx, x, y):
-    cx, cy = 34.5, 21.5
+    cx, cy = 34.5, 22.0
     d = 999.0
     if idx == 0:  # WIFI
-        by = 28.0
+        by = 28.5
         d = min(d, max(math.hypot(x - cx, y - by) - 1.5, 0.0))
         dx, dy = x - cx, y - by
         if dy < 0 and abs(dx) < -dy * 1.15:
@@ -50,44 +50,45 @@ def sd_icon(idx, x, y):
                 ay = -rad * 0.66
                 d = min(d, math.hypot(dx - ax, dy - ay), math.hypot(dx + ax, dy - ay))
     elif idx == 1:  # BT
-        d = min(d, sd_seg(x, y, cx, 9.5, cx, 33.5))
-        d = min(d, sd_seg(x, y, cx, 9.5, cx + 6.5, 15.5))
-        d = min(d, sd_seg(x, y, cx + 6.5, 15.5, cx - 6.5, 27.5))
-        d = min(d, sd_seg(x, y, cx - 6.5, 15.5, cx + 6.5, 27.5))
-        d = min(d, sd_seg(x, y, cx + 6.5, 27.5, cx, 33.5))
+        d = min(d, sd_seg(x, y, cx, 10, cx, 34))
+        d = min(d, sd_seg(x, y, cx, 10, cx + 6.5, 16))
+        d = min(d, sd_seg(x, y, cx + 6.5, 16, cx - 6.5, 28))
+        d = min(d, sd_seg(x, y, cx - 6.5, 16, cx + 6.5, 28))
+        d = min(d, sd_seg(x, y, cx + 6.5, 28, cx, 34))
     elif idx == 2:  # MESH
-        pts = [(cx, 12.0), (cx - 8.5, 27.0), (cx + 8.5, 27.0)]
+        pts = [(cx, 12.5), (cx - 8.5, 27.5), (cx + 8.5, 27.5)]
         for px, py in pts:
             d = min(d, abs(math.hypot(x - px, y - py) - 2.6))
+        d = min(d, max(sd_seg(x, y, pts[0][0], pts[0][1], pts[1][0], pts[1][1]), 3.0 - math.hypot(x - pts[0][0], y - pts[0][1])))
         d = min(d, sd_seg(x, y, pts[0][0] - 1.5, pts[0][1] + 2.2, pts[1][0] + 1.5, pts[1][1] - 2.2))
         d = min(d, sd_seg(x, y, pts[0][0] + 1.5, pts[0][1] + 2.2, pts[2][0] - 1.5, pts[2][1] - 2.2))
         d = min(d, sd_seg(x, y, pts[1][0] + 2.6, pts[1][1], pts[2][0] - 2.6, pts[2][1]))
-    elif idx == 3:  # GEM (AI Spark)
-        d = min(d, sd_seg(x, y, cx, 9.5, cx, 33.5))
+    elif idx == 3:  # GEM
+        d = min(d, sd_seg(x, y, cx, 10, cx, 34))
         d = min(d, sd_seg(x, y, cx - 11, cy, cx + 11, cy))
         d = min(d, sd_seg(x, y, cx - 5.5, cy - 5.5, cx + 5.5, cy + 5.5))
         d = min(d, sd_seg(x, y, cx - 5.5, cy + 5.5, cx + 5.5, cy - 5.5))
-    elif idx == 4:  # MPY (< / >)
-        d = min(d, sd_seg(x, y, cx - 5, 14.5, cx - 10.5, cy))
-        d = min(d, sd_seg(x, y, cx - 10.5, cy, cx - 5, 28.5))
-        d = min(d, sd_seg(x, y, cx + 5, 14.5, cx + 10.5, cy))
-        d = min(d, sd_seg(x, y, cx + 10.5, cy, cx + 5, 28.5))
-        d = min(d, sd_seg(x, y, cx + 2, 13.5, cx - 2, 29.5))
-    elif idx == 5:  # FLASH (Chip)
+    elif idx == 4:  # MPY
+        d = min(d, sd_seg(x, y, cx - 5, 15, cx - 10.5, cy))
+        d = min(d, sd_seg(x, y, cx - 10.5, cy, cx - 5, 29))
+        d = min(d, sd_seg(x, y, cx + 5, 15, cx + 10.5, cy))
+        d = min(d, sd_seg(x, y, cx + 10.5, cy, cx + 5, 29))
+        d = min(d, sd_seg(x, y, cx + 2, 14, cx - 2, 30))
+    elif idx == 5:  # FLASH
         d = min(d, abs(sd_round_box(x, y, cx, cy, 6.5, 6.5, 1.5)))
         for off in (-3.5, 0.0, 3.5):
             d = min(d, sd_seg(x, y, cx - 10, cy + off, cx - 6.5, cy + off))
             d = min(d, sd_seg(x, y, cx + 6.5, cy + off, cx + 10, cy + off))
             d = min(d, sd_seg(x, y, cx + off, cy - 10, cx + off, cy - 6.5))
             d = min(d, sd_seg(x, y, cx + off, cy + 6.5, cx + off, cy + 10))
-    elif idx == 6:  # OTA (Download/Cloud)
-        d = min(d, sd_seg(x, y, cx, 10.5, cx, 24.0))
-        d = min(d, sd_seg(x, y, cx - 5, 19.0, cx, 24.0))
-        d = min(d, sd_seg(x, y, cx + 5, 19.0, cx, 24.0))
-        d = min(d, sd_seg(x, y, cx - 9, 23.5, cx - 9, 29.0))
-        d = min(d, sd_seg(x, y, cx - 9, 29.0, cx + 9, 29.0))
-        d = min(d, sd_seg(x, y, cx + 9, 29.0, cx + 9, 23.5))
-    elif idx == 7:  # SET (Gear)
+    elif idx == 6:  # OTA
+        d = min(d, sd_seg(x, y, cx, 11, cx, 24.5))
+        d = min(d, sd_seg(x, y, cx - 5, 19.5, cx, 24.5))
+        d = min(d, sd_seg(x, y, cx + 5, 19.5, cx, 24.5))
+        d = min(d, sd_seg(x, y, cx - 9, 24, cx - 9, 29.5))
+        d = min(d, sd_seg(x, y, cx - 9, 29.5, cx + 9, 29.5))
+        d = min(d, sd_seg(x, y, cx + 9, 29.5, cx + 9, 24))
+    elif idx == 7:  # SET
         r = math.hypot(x - cx, y - cy)
         d = min(d, abs(r - 7.5), abs(r - 3.0))
         for a_deg in range(0, 360, 45):
@@ -126,24 +127,23 @@ for idx in range(8):
 
             for is_sel, arr in ((False, norm_arr), (True, sel_arr)):
                 if sb < 0:
-                    # +35% jaśniejsze tło wewnętrzne dla aktywnego kafelka
-                    br, bg, bb = (52, 24, 92) if is_sel else (14, 6, 26)
+                    br, bg, bb = (34, 14, 62) if is_sel else (18, 8, 34)
                 else:
                     br, bg, bb = (9, 4, 18)
 
-                # Dużo mocniejsza poświata Gaussa i gorący rdzeń (+30% jasności dla zaznaczonego)
-                gb = math.exp(-db * (0.24 if is_sel else 0.58)) * (1.55 if is_sel else 0.70)
-                cb = max(0.0, 1.0 - db / (2.4 if is_sel else 1.30))
+                # Podbita poświata Gaussa (mocniejszy efekt neonu)
+                gb = math.exp(-db * (0.28 if is_sel else 0.45)) * (1.35 if is_sel else 0.95)
+                cb = max(0.0, 1.0 - db / (2.2 if is_sel else 1.55))
 
-                gi = math.exp(-di * (0.28 if is_sel else 0.58)) * (1.50 if is_sel else 0.80)
-                ci = max(0.0, 1.0 - di / (2.2 if is_sel else 1.40))
+                gi = math.exp(-di * (0.30 if is_sel else 0.45)) * (1.35 if is_sel else 1.05)
+                ci = max(0.0, 1.0 - di / (2.1 if is_sel else 1.65))
 
-                wb = (cb ** 1.3) * (1.15 if is_sel else 0.40)
-                wi = (ci ** 1.3) * (1.15 if is_sel else 0.50)
+                wb = (cb ** 1.4) * (0.95 if is_sel else 0.60)
+                wi = (ci ** 1.4) * (1.00 if is_sel else 0.70)
 
-                r = br + nr * (gb + cb * 0.95) + ir * (gi + ci * 0.95) + 255.0 * (wb + wi)
-                g = bg + ng * (gb + cb * 0.95) + ig * (gi + ci * 0.95) + 255.0 * (wb + wi)
-                b = bb + nb * (gb + cb * 0.95) + ib * (gi + ci * 0.95) + 255.0 * (wb + wi)
+                r = br + nr * (gb + cb * 0.95) + ir * (gi + ci * 1.0) + 255.0 * (wb + wi)
+                g = bg + ng * (gb + cb * 0.95) + ig * (gi + ci * 1.0) + 255.0 * (wb + wi)
+                b = bb + nb * (gb + cb * 0.95) + ib * (gi + ci * 1.0) + 255.0 * (wb + wi)
 
                 arr.append(f"0x{to_rgb565(r, g, b, x, y):04X}")
 
@@ -156,4 +156,4 @@ out.append("const uint16_t* const TILES_SEL[8] = { tile_sel_0, tile_sel_1, tile_
 with open("src/cyber_assets.h", "w") as f:
     f.writelines(out)
 
-print("[SHADER] Wygenerowano src/cyber_assets.h (+30% Boost na aktywnym kafelku)")
+print("[SHADER] Wygenerowano podbite tekstury neonowe w src/cyber_assets.h")
