@@ -5,7 +5,6 @@
 #define FIRMWARE_VERSION "v1.0.8-PROTOTYPE"
 
 #define LGFX_USE_V1
-#define LGFX_AUTODETECT
 
 #include <Arduino.h>
 #include <Wire.h>
@@ -13,7 +12,6 @@
 #include <LittleFS.h>
 #include <SPIFFS.h>
 #include <LovyanGFX.hpp>
-#include <LGFX_AUTODETECT.hpp>
 #include <esp_ota_ops.h>
 #include <esp_partition.h>
 #include <esp_system.h>
@@ -23,6 +21,7 @@
 #include <cmath>
 #include <cstring>
 
+#define PIN_POWER_ON       15
 #define PIN_BTN_TOP        0
 #define PIN_BTN_BOTTOM     14
 #define PIN_LCD_BL         38
@@ -30,6 +29,69 @@
 #define PIN_ADV_DETECT     43
 #define PIN_GROVE_SDA      18
 #define PIN_GROVE_SCL      17
+
+class LGFX : public lgfx::LGFX_Device {
+    lgfx::Panel_ST7789  _panel_instance;
+    lgfx::Bus_Parallel8 _bus_instance;
+    lgfx::Light_PWM     _light_instance;
+
+public:
+    LGFX(void) {
+        {
+            auto cfg = _bus_instance.config();
+            cfg.freq_write = 20000000;
+            cfg.pin_wr = 8;
+            cfg.pin_rd = 9;
+            cfg.pin_rs = 7;
+            cfg.pin_d0 = 39;
+            cfg.pin_d1 = 40;
+            cfg.pin_d2 = 41;
+            cfg.pin_d3 = 42;
+            cfg.pin_d4 = 45;
+            cfg.pin_d5 = 46;
+            cfg.pin_d6 = 47;
+            cfg.pin_d7 = 48;
+            _bus_instance.config(cfg);
+            _panel_instance.setBus(&_bus_instance);
+        }
+        {
+            auto cfg = _panel_instance.config();
+            cfg.pin_cs           = 6;
+            cfg.pin_rst          = 5;
+            cfg.pin_busy         = -1;
+            cfg.panel_width      = 170;
+            cfg.panel_height     = 320;
+            cfg.offset_x         = 35;
+            cfg.offset_y         = 0;
+            cfg.offset_rotation  = 0;
+            cfg.dummy_read_pixel = 8;
+            cfg.dummy_read_bits  = 1;
+            cfg.readable         = true;
+            cfg.invert           = true;
+            cfg.rgb_order        = false;
+            cfg.dlen_16bit       = false;
+            cfg.bus_shared       = false;
+            _panel_instance.config(cfg);
+        }
+        {
+            auto cfg = _light_instance.config();
+            cfg.pin_bl      = PIN_LCD_BL;
+            cfg.invert      = false;
+            cfg.freq        = 12000;
+            cfg.pwm_channel = 7;
+            _light_instance.config(cfg);
+            _panel_instance.setLight(&_light_instance);
+        }
+        setPanel(&_panel_instance);
+    }
+
+    bool init_impl(bool use_reset, bool use_clear) override {
+        pinMode(PIN_POWER_ON, OUTPUT);
+        digitalWrite(PIN_POWER_ON, HIGH);
+        delay(10);
+        return lgfx::LGFX_Device::init_impl(use_reset, use_clear);
+    }
+};
 
 constexpr int SCREEN_W     = 320;
 constexpr int SCREEN_H     = 170;
