@@ -1,4 +1,4 @@
-# Smolinski | Labs Tactical Cluster OS
+# Smolinski|Labs Tactical Cluster OS
 
 **Author:** @whoami (Radek | Smolinski | Labs)  
 **Architecture:** ESP32-S3 (N16R8 - 16MB Flash / 8MB PSRAM)[cite: 10] 
