@@ -1,436 +1,310 @@
-#include <Arduino.h>
-#include <WiFi.h>
-#include <esp_now.h>
-#include <math.h>
-#include "config.h"
+#include "launcher.h"
 
-#pragma pack(push, 1)
-struct TelemetryPacket {
-    uint8_t  magic;
-    uint8_t  activeModule;
-    uint8_t  operationMode;
-    uint32_t frequencyHz;
-    int16_t  rssiDbm;
-    uint8_t  spectrumBins[64];
+LGFX tft;
+LGFX_Sprite canvas(&tft);
+SPIClass sdSPI(FSPI);
+
+const I18nStrings kI18n[4] = {
+    {"BT SIG", "WiFi",   "Gemini", "Mesh", "uPython", "Flash", "OTA", "Config", "OFFLOAD", "HUD LINK"},
+    {"BT SIG", "WLAN",   "Gemini", "Mesh", "uPython", "Flash", "OTA", "Setup",  "OFFLOAD", "HUD AKTIV"},
+    {"BT SIG", "WiFi",   "Gemini", "Mesh", "uPython", "Flash", "OTA", "Opt",    "OFFLOAD", "HUD СВЯЗЬ"},
+    {"BT SIG", "WiFi",   "Gemini", "Mesh", "uPython", "Flash", "OTA", "Ustaw.", "OFFLOAD", "HUD AKTYWNY"}
 };
-#pragma pack(pop)
+
+TileModule tiles[8] = {
+    {ModuleID::MOD_BT,       0x05FF, true, 1.0f, nullptr},
+    {ModuleID::MOD_WIFI,     0x07E0, true, 1.0f, nullptr},
+    {ModuleID::MOD_GEMINI,   0xF81F, true, 1.0f, nullptr},
+    {ModuleID::MOD_MESH,     0xFFE0, true, 1.0f, nullptr},
+    {ModuleID::MOD_MPY,      0xFD20, true, 1.0f, nullptr},
+    {ModuleID::MOD_FLASH,    0xF800, true, 1.0f, nullptr},
+    {ModuleID::MOD_OTA,      0x07FF, true, 1.0f, nullptr},
+    {ModuleID::MOD_SETTINGS, 0xCE79, true, 1.0f, nullptr}
+};
+
+LangID currentLang       = LangID::LANG_PL;
+ClusterMode currentMode  = ClusterMode::MODE_DOCKED_CLUSTER;
+uint8_t selectedTile     = 0;
+bool sdMounted           = false;
+bool waterfallMode       = false;
 
 TelemetryPacket rxPacket;
-volatile bool newFrameReady = false;
-uint32_t lastPacketMs = 0;
-uint8_t currentView = 0;
-uint8_t backlightLevel = 180;
+volatile bool packetReceived = false;
+uint32_t lastPacketMs        = 0;
+uint8_t peakHold[64]         = {0};
+uint8_t waterfallBuf[24][64] = {{0}};
 
-bool sdReady = false;
-bool advAntennaEnabled = false;
-AdvScheduleItem advSchedule = {0, 0, false};
+uint32_t lastRenderMs    = 0;
+uint32_t btnTopPressMs   = 0;
+uint32_t btnBotPressMs   = 0;
+bool btnTopLast          = true;
+bool btnBotLast          = true;
 
-static uint8_t peakHold[64] = {0};
-static uint8_t waterfall[64][96] = {{0}};
-
-static const uint16_t COLOR_BG = 0x0000;
-static const uint16_t COLOR_PANEL = 0x1065;
-static const uint16_t COLOR_WHITE = 0xFFFF;
-static const uint16_t COLOR_CYAN = 0x07FF;
-static const uint16_t COLOR_GREEN = 0x07E0;
-static const uint16_t COLOR_YELLOW = 0xFFE0;
-static const uint16_t COLOR_RED = 0xF800;
-static const uint16_t COLOR_BLUE = 0x001F;
-static const uint16_t COLOR_MUTED = 0x8410;
-
-LGFX_Sprite canvas(&tft);
-
-bool initSdCard() {
-    SPI.begin(SD_SCK_PIN, SD_MISO_PIN, SD_MOSI_PIN, SD_CS_PIN);
-
-    if (!SD.begin(SD_CS_PIN, SPI)) {
-        Serial.println("[SD] INIT FAILED");
-        return false;
+uint8_t calculateXOR(const uint8_t* data, size_t len) {
+    uint8_t crc = 0;
+    for (size_t i = 0; i < len; i++) {
+        crc ^= data[i];
     }
-
-    if (!SD.exists("/logs")) {
-        SD.mkdir("/logs");
-    }
-
-    if (!SD.exists("/cfg")) {
-        SD.mkdir("/cfg");
-    }
-
-    File bootInfo = SD.open("/logs/boot.log", FILE_WRITE);
-    if (bootInfo) {
-        bootInfo.println("Smolinski|Labs boot");
-        bootInfo.close();
-    }
-
-    sdReady = true;
-    Serial.println("[SD] READY");
-    return true;
+    return crc;
 }
 
-void appendSdLog(const String& msg) {
-    if (!sdReady) {
-        return;
-    }
-
-    File logFile = SD.open("/logs/system.log", FILE_APPEND);
-    if (!logFile) {
-        Serial.println("[SD] Cannot open log file");
-        return;
-    }
-
-    logFile.print(millis());
-    logFile.print(" - ");
-    logFile.println(msg);
-    logFile.close();
+uint16_t thermalColor565(uint8_t val) {
+    if (val < 64)  return tft.color565(0, val * 2, 128 + val * 2);       // Niebieski -> Cyjan
+    if (val < 128) return tft.color565(0, 128 + (val - 64) * 2, 255 - (val - 64) * 4); // Cyjan -> Zielony
+    if (val < 192) return tft.color565((val - 128) * 4, 255, 0);         // Zielony -> Żółty
+    return tft.color565(255, 255 - (val - 192) * 4, 0);                  // Żółty -> Czerwony
 }
 
-bool saveTelemetrySnapshot(const TelemetryPacket& pkt) {
-    if (!sdReady) {
-        return false;
-    }
-
-    File f = SD.open("/cfg/last_packet.txt", FILE_WRITE);
-    if (!f) {
-        return false;
-    }
-
-    f.printf("magic=%u\nactiveModule=%u\nfrequencyHz=%lu\nrssiDbm=%d\n",
-             pkt.magic,
-             pkt.activeModule,
-             pkt.frequencyHz,
-             pkt.rssiDbm);
-
-    for (int i = 0; i < 64; ++i) {
-        f.printf("%d%c", pkt.spectrumBins[i], (i == 63) ? '\n' : ',');
-    }
-
-    f.close();
-    return true;
-}
-
-void setAdvAntennaState(bool enabled) {
-    advAntennaEnabled = enabled;
-    pinMode(PIN_ANTENNA_SW, OUTPUT);
-    digitalWrite(PIN_ANTENNA_SW, enabled ? HIGH : LOW);
-}
-
-void scheduleAdvWindow(uint32_t delayMs, uint32_t durationMs, bool enabled) {
-    advSchedule.enabled = enabled;
-    advSchedule.startAtMs = millis() + delayMs;
-    advSchedule.endAtMs = advSchedule.startAtMs + durationMs;
-
-    if (!enabled) {
-        setAdvAntennaState(false);
-    }
-}
-
-void updateAdvScheduler() {
-    if (!advSchedule.enabled) {
-        setAdvAntennaState(false);
-        return;
-    }
-
-    uint32_t now = millis();
-    if (now < advSchedule.startAtMs) {
-        setAdvAntennaState(false);
-        return;
-    }
-
-    if (now < advSchedule.endAtMs) {
-        setAdvAntennaState(true);
-        return;
-    }
-
-    setAdvAntennaState(false);
-    advSchedule.enabled = false;
-}
-
-const char* moduleName(uint8_t module) {
-    switch (module) {
-        case 1: return "CC1101";
-        case 2: return "nRF24";
-        default: return "IDLE";
-    }
-}
-
-float mhzFromHz(uint32_t hz) {
-    return (float)hz / 1000000.0f;
-}
-
-uint16_t dbmToColor(int16_t dbm) {
-    // Thermal palette from -95 dBm (blue/cyan) to -40 dBm (yellow/red)
-    if (dbm <= -95) return COLOR_BLUE;
-    if (dbm >= -40) return COLOR_RED;
-
-    float t = (float)(dbm + 95) / 55.0f;
-    t = constrain(t, 0.0f, 1.0f);
-
-    uint8_t r = 0, g = 0, b = 0;
-    if (t < 0.25f) {
-        float u = t / 0.25f;
-        r = 0;
-        g = (uint8_t)(64 + u * 160);
-        b = 255;
-    } else if (t < 0.50f) {
-        float u = (t - 0.25f) / 0.25f;
-        r = 0;
-        g = 224 + (uint8_t)(u * 31);
-        b = (uint8_t)(255 - u * 180);
-    } else if (t < 0.75f) {
-        float u = (t - 0.50f) / 0.25f;
-        r = (uint8_t)(u * 255);
-        g = 255;
-        b = 0;
-    } else {
-        float u = (t - 0.75f) / 0.25f;
-        r = 255;
-        g = (uint8_t)(255 - u * 180);
-        b = 0;
-    }
-
-    return ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3);
-}
-
-uint16_t blendColor(uint16_t a, uint16_t b, float mix) {
-    uint8_t ar = (a >> 11) & 0x1F;
-    uint8_t ag = (a >> 5) & 0x3F;
-    uint8_t ab = a & 0x1F;
-
-    uint8_t br = (b >> 11) & 0x1F;
-    uint8_t bg = (b >> 5) & 0x3F;
-    uint8_t bb = b & 0x1F;
-
-    uint8_t rr = (uint8_t)(ar + (br - ar) * mix);
-    uint8_t gg = (uint8_t)(ag + (bg - ag) * mix);
-    uint8_t bbv = (uint8_t)(ab + (bb - ab) * mix);
-
-    return (rr << 11) | (gg << 5) | bbv;
-}
-
-void drawStatusBar(const TelemetryPacket& pkt, bool lost) {
-    canvas.fillRect(0, 0, SCREEN_W, 24, COLOR_PANEL);
-    canvas.drawFastHLine(0, 23, SCREEN_W, COLOR_CYAN);
-
-    canvas.setTextColor(COLOR_WHITE, COLOR_PANEL);
-    canvas.setTextSize(1);
-    canvas.setCursor(6, 6);
-
-    if (lost) {
-        canvas.print("NO SIGNAL FROM ADV");
-        return;
-    }
-
-    canvas.printf("CHIP:%s", moduleName(pkt.activeModule));
-    canvas.setCursor(122, 6);
-    canvas.printf("FREQ:%.2f MHz", mhzFromHz(pkt.frequencyHz));
-    canvas.setCursor(234, 6);
-    canvas.printf("RSSI:%d dBm", pkt.rssiDbm);
-}
-
-void drawBarGraph(const TelemetryPacket& pkt) {
-    const int graphX = 8;
-    const int graphY = 34;
-    const int graphW = SCREEN_W - 16;
-    const int graphH = SCREEN_H - 46;
-
-    canvas.fillRoundRect(graphX, graphY, graphW, graphH, 8, 0x0841);
-    canvas.drawRoundRect(graphX, graphY, graphW, graphH, 8, COLOR_CYAN);
-
-    for (int i = 0; i <= 8; ++i) {
-        int x = graphX + (graphW * i) / 8;
-        canvas.drawFastVLine(x, graphY, graphH, 0x3186);
-    }
-    for (int i = 0; i <= 6; ++i) {
-        int y = graphY + (graphH * i) / 6;
-        canvas.drawFastHLine(graphX, y, graphW, 0x3186);
-    }
-
-    int barGap = 2;
-    int barW = (graphW - barGap * 63) / 64;
-
-    for (int i = 0; i < 64; ++i) {
-        int value = pkt.spectrumBins[i];
-        int barH = map(value, 0, 255, 0, graphH - 4);
-        int x = graphX + i * (barW + barGap);
-        int y = graphY + graphH - barH;
-
-        int16_t dbm = map(i, 0, 63, -95, -40) - (int16_t)value / 8;
-        uint16_t color = dbmToColor(dbm);
-        canvas.fillRect(x, y, barW, barH, color);
-
-        if (value > peakHold[i]) {
-            peakHold[i] = value;
-        } else {
-            if (peakHold[i] > 0) {
-                peakHold[i] = max(0, (int)peakHold[i] - 2);
-            }
-        }
-
-        int peakY = graphY + graphH - map(peakHold[i], 0, 255, 0, graphH - 4);
-        canvas.drawFastHLine(x, peakY, barW, COLOR_WHITE);
-    }
-
-    canvas.setTextColor(COLOR_WHITE, 0x0841);
-    canvas.setTextSize(1);
-    canvas.setCursor(graphX + 4, graphY + 4);
-    canvas.print("BAR GRAPH");
-}
-
-void drawWaterfall(const TelemetryPacket& pkt) {
-    const int graphX = 8;
-    const int graphY = 34;
-    const int graphW = SCREEN_W - 16;
-    const int graphH = SCREEN_H - 46;
-
-    // Shift history upward
-    for (int y = 0; y < 95; ++y) {
-        for (int x = 0; x < 64; ++x) {
-            waterfall[x][y] = waterfall[x][y + 1];
+void onEspNowRecv(const uint8_t* mac, const uint8_t* incomingData, int len) {
+    if (len == sizeof(TelemetryPacket) && incomingData[0] == 0xA5) {
+        uint8_t expectedCrc = calculateXOR(incomingData, sizeof(TelemetryPacket) - 1);
+        if (expectedCrc == incomingData[sizeof(TelemetryPacket) - 1]) {
+            memcpy(&rxPacket, incomingData, sizeof(TelemetryPacket));
+            lastPacketMs   = millis();
+            packetReceived = true;
         }
     }
-
-    for (int x = 0; x < 64; ++x) {
-        waterfall[x][95] = pkt.spectrumBins[x];
-    }
-
-    canvas.fillRoundRect(graphX, graphY, graphW, graphH, 8, 0x0000);
-    canvas.drawRoundRect(graphX, graphY, graphW, graphH, 8, COLOR_CYAN);
-
-    for (int x = 0; x < 64; ++x) {
-        int px = graphX + map(x, 0, 63, 0, graphW - 1);
-        for (int y = 0; y < graphH; ++y) {
-            uint8_t v = waterfall[x][(y * 96) / graphH];
-            if (v == 0) continue;
-
-            int16_t dbm = map(x, 0, 63, -95, -40) - (int16_t)v / 8;
-            uint16_t color = dbmToColor(dbm);
-            canvas.drawFastVLine(px, graphY + y, 1, color);
-        }
-    }
-
-    canvas.setTextColor(COLOR_WHITE, 0x0000);
-    canvas.setTextSize(1);
-    canvas.setCursor(graphX + 4, graphY + 4);
-    canvas.print("WATERFALL");
 }
 
-void renderHUD(const TelemetryPacket& pkt) {
-    const bool lost = (millis() - lastPacketMs) > 500UL;
-    canvas.fillScreen(COLOR_BG);
-    drawStatusBar(pkt, lost);
+bool validateBootSignature() {
+    return (strcmp(SYSTEM_AUTHOR, "@whoami") == 0);
+}
 
-    if (lost) {
-        canvas.setTextColor(COLOR_RED, COLOR_BG);
-        canvas.setTextSize(2);
-        canvas.setCursor(38, 84);
-        canvas.print("NO SIGNAL FROM ADV");
-        canvas.pushSprite(0, 0);
-        return;
+void renderBootSignatureStatic() {
+    tft.fillScreen(TFT_BLACK);
+    tft.setTextColor(0x07E0, TFT_BLACK);
+    tft.setCursor(12, 55);
+    tft.setTextSize(2);
+    tft.printf("%s\n", SYSTEM_PROJECT);
+    tft.setTextSize(1);
+    tft.setCursor(12, 82);
+    tft.setTextColor(0xFFE0, TFT_BLACK);
+    tft.printf("AUTH: %s | %s | SD: %s", SYSTEM_AUTHOR, FIRMWARE_VERSION, sdMounted ? "OK" : "NO");
+    delay(600);
+}
+
+const char* getTileTitle(ModuleID id, const I18nStrings& s) {
+    switch (id) {
+        case ModuleID::MOD_BT:       return s.bt;
+        case ModuleID::MOD_WIFI:     return s.wifi;
+        case ModuleID::MOD_GEMINI:   return s.gemini;
+        case ModuleID::MOD_MESH:     return s.mesh;
+        case ModuleID::MOD_MPY:      return s.mpy;
+        case ModuleID::MOD_FLASH:    return s.flash;
+        case ModuleID::MOD_OTA:      return s.ota;
+        case ModuleID::MOD_SETTINGS: return s.settings;
+        default:                     return "";
     }
+}
 
-    if (currentView == 0) {
-        drawBarGraph(pkt);
-    } else {
-        drawWaterfall(pkt);
+void renderLauncherUI() {
+    canvas.fillSprite(0x0841);
+    const I18nStrings& s = kI18n[static_cast<uint8_t>(currentLang)];
+
+    // Topbar
+    canvas.fillRect(0, 0, SCREEN_W, TOPBAR_H, 0x10A2);
+    canvas.setTextColor(0x07FF);
+    canvas.setTextSize(1);
+    canvas.setCursor(8, 8);
+    canvas.printf("%s [%s]", SYSTEM_PROJECT, SYSTEM_AUTHOR);
+
+    bool linkAlive = (millis() - lastPacketMs < 1000) && (lastPacketMs > 0);
+    canvas.setTextColor(linkAlive ? 0x07E0 : 0xFBE0);
+    canvas.setCursor(220, 8);
+    canvas.printf("SD:%s %s", sdMounted ? "OK" : "--", linkAlive ? s.cluster_active : "LOCAL");
+
+    // 4x2 Grid
+    for (int i = 0; i < 8; i++) {
+        int col = i % GRID_COLS;
+        int row = i / GRID_COLS;
+        int x = GRID_START_X + col * (TILE_W + TILE_GAP);
+        int y = GRID_START_Y + row * (TILE_H + TILE_GAP);
+
+        bool sel = (i == selectedTile);
+        uint16_t bg = sel ? 0x2124 : 0x1082;
+        canvas.fillRoundRect(x, y, TILE_W, TILE_H, 6, bg);
+        canvas.drawRoundRect(x, y, TILE_W, TILE_H, 6, sel ? 0xFFFF : tiles[i].accentColor565);
+
+        canvas.fillCircle(x + 14, y + 18, 5, tiles[i].accentColor565);
+        canvas.setTextColor(sel ? 0xFFFF : 0xCE79);
+        canvas.setCursor(x + 8, y + 42);
+        canvas.printf("%s", getTileTitle(tiles[i].id, s));
     }
 
     canvas.pushSprite(0, 0);
 }
 
-void onTelemetryReceive(const uint8_t* mac, const uint8_t* incomingData, int len) {
-    if (incomingData == nullptr || len != sizeof(TelemetryPacket)) {
-        return;
+void renderTacticalHUD() {
+    canvas.fillSprite(TFT_BLACK);
+
+    bool linkAlive = (millis() - lastPacketMs < 600) && (lastPacketMs > 0);
+    const char* modStr = (rxPacket.activeModule == 1) ? "CC1101" :
+                         (rxPacket.activeModule == 2) ? "nRF24"  : "IDLE";
+    const char* modeStr = (rxPacket.operationMode == 1) ? "SPEC" :
+                          (rxPacket.operationMode == 2) ? "SNIFF" : "STBY";
+
+    // Pasek nagłówkowy HUD
+    canvas.fillRect(0, 0, SCREEN_W, 22, 0x1082);
+    canvas.setTextSize(1);
+    canvas.setTextColor(0x07FF);
+    canvas.setCursor(6, 7);
+    canvas.printf("[%s] %s", modStr, modeStr);
+
+    canvas.setTextColor(0xFFE0);
+    canvas.setCursor(105, 7);
+    if (rxPacket.activeModule == 2) {
+        canvas.printf("2400-2525 MHz");
+    } else {
+        canvas.printf("%6.2f MHz", (float)rxPacket.frequencyHz / 1000000.0f);
     }
 
-    if (incomingData[0] != 0xA5) {
-        return;
+    uint16_t rssiColor = (rxPacket.rssiDbm > -55) ? 0xF800 :
+                         (rxPacket.rssiDbm > -80) ? 0xFFE0 : 0x07E0;
+    canvas.setTextColor(rssiColor);
+    canvas.setCursor(200, 7);
+    canvas.printf("%4d dBm", rxPacket.rssiDbm);
+
+    canvas.setTextColor(linkAlive ? 0x07E0 : 0xF800);
+    canvas.setCursor(262, 7);
+    canvas.printf(linkAlive ? "LINK OK" : "NO ADV");
+
+    // Obszar wykresu (Y: 24..154, Wysokość: 130 px)
+    const int graphTop = 26;
+    const int graphH   = 128;
+
+    if (!waterfallMode) {
+        // Siatka pomocnicza dBm
+        for (int y = graphTop; y <= graphTop + graphH; y += 32) {
+            canvas.drawFastHLine(0, y, SCREEN_W, 0x18E3);
+        }
+
+        for (int i = 0; i < 64; i++) {
+            uint8_t val = rxPacket.spectrumBins[i];
+            if (val >= peakHold[i]) {
+                peakHold[i] = val;
+            } else if (peakHold[i] > 2) {
+                peakHold[i] -= 2;
+            }
+
+            int barH  = (val * graphH) / 255;
+            int peakY = graphTop + graphH - ((peakHold[i] * graphH) / 255);
+            int x     = i * 5;
+
+            if (barH > 0) {
+                canvas.fillRect(x, graphTop + graphH - barH, 4, barH, thermalColor565(val));
+            }
+            canvas.drawFastHLine(x, peakY, 4, 0xFFFF);
+        }
+    } else {
+        // Tryb Waterfall (Mapa ciepła)
+        for (int r = 0; r < 24; r++) {
+            for (int c = 0; c < 64; c++) {
+                uint8_t v = waterfallBuf[r][c];
+                if (v > 0) {
+                    canvas.fillRect(c * 5, graphTop + r * 5, 4, 4, thermalColor565(v));
+                }
+            }
+        }
     }
 
-    memcpy(&rxPacket, incomingData, sizeof(TelemetryPacket));
-    newFrameReady = true;
-    lastPacketMs = millis();
+    // Stopka informacyjna
+    canvas.setTextColor(0x7BEF);
+    canvas.setCursor(6, 158);
+    canvas.printf("TOP[0]: %s | BOT[14]: UI/Launcher | %s", waterfallMode ? "WATERFALL" : "SPECTRUM", SYSTEM_AUTHOR);
 
-    if (sdReady) {
-        saveTelemetrySnapshot(rxPacket);
-        appendSdLog("telemetry captured");
-    }
+    canvas.pushSprite(0, 0);
 }
 
-void setBrightness(uint8_t value) {
-    backlightLevel = constrain(value, 20, 255);
-    tft.setBrightness(backlightLevel);
-}
+void handleButtons() {
+    bool topNow = digitalRead(PIN_BTN_TOP);
+    bool botNow = digitalRead(PIN_BTN_BOTTOM);
 
-void pollButtons() {
-    static bool lastTop = HIGH;
-    static bool lastBottom = HIGH;
-
-    bool topPressed = (digitalRead(PIN_BTN_TOP) == LOW);
-    bool bottomPressed = (digitalRead(PIN_BTN_BOTTOM) == LOW);
-
-    if (topPressed && !lastTop) {
-        currentView = (currentView + 1) & 1;
+    // Górny przycisk (GPIO 0)
+    if (!topNow && btnTopLast) {
+        btnTopPressMs = millis();
+    } else if (topNow && !btnTopLast && (millis() - btnTopPressMs > 30)) {
+        if (currentMode == ClusterMode::MODE_DOCKED_CLUSTER) {
+            waterfallMode = !waterfallMode;
+        } else {
+            selectedTile = (selectedTile + 1) % 8;
+        }
     }
+    btnTopLast = topNow;
 
-    if (bottomPressed && !lastBottom) {
-        backlightLevel = constrain((int)backlightLevel - 25, 20, 255);
-        setBrightness(backlightLevel);
+    // Dolny przycisk (GPIO 14)
+    if (!botNow && btnBotLast) {
+        btnBotPressMs = millis();
+    } else if (botNow && !btnBotLast) {
+        uint32_t held = millis() - btnBotPressMs;
+        if (held > 600) {
+            currentLang = static_cast<LangID>((static_cast<uint8_t>(currentLang) + 1) % 4);
+        } else if (held > 30) {
+            currentMode = (currentMode == ClusterMode::MODE_DOCKED_CLUSTER)
+                          ? ClusterMode::MODE_STANDALONE_UI
+                          : ClusterMode::MODE_DOCKED_CLUSTER;
+        }
     }
-
-    lastTop = topPressed;
-    lastBottom = bottomPressed;
+    btnBotLast = botNow;
 }
 
 void setup() {
     pinMode(PIN_POWER_ON, OUTPUT);
     digitalWrite(PIN_POWER_ON, HIGH);
 
+    pinMode(PIN_ANTENNA_SW, OUTPUT);
+    digitalWrite(PIN_ANTENNA_SW, ADV_2G4_ENABLED);
+
     pinMode(PIN_BTN_TOP, INPUT_PULLUP);
     pinMode(PIN_BTN_BOTTOM, INPUT_PULLUP);
 
-    pinMode(PIN_ANTENNA_SW, OUTPUT);
-    digitalWrite(PIN_ANTENNA_SW, LOW);
-
     Serial.begin(115200);
-    delay(100);
-
-    initSdCard();
-    appendSdLog("system boot");
 
     tft.init();
     tft.setRotation(1);
-    tft.setBrightness(backlightLevel);
+    tft.setBrightness(220);
 
     canvas.setColorDepth(16);
     canvas.createSprite(SCREEN_W, SCREEN_H);
-    canvas.setSwapBytes(true);
 
-    memset(&rxPacket, 0, sizeof(rxPacket));
-    memset(peakHold, 0, sizeof(peakHold));
-    memset(waterfall, 0, sizeof(waterfall));
+    // Inicjalizacja karty SD na niezależnej szynie SPI
+    sdSPI.begin(SD_SCK_PIN, SD_MISO_PIN, SD_MOSI_PIN, SD_CS_PIN);
+    sdMounted = SD.begin(SD_CS_PIN, sdSPI, 16000000);
 
-    WiFi.mode(WIFI_STA);
-    WiFi.disconnect();
-    delay(50);
-
-    if (esp_now_init() == ESP_OK) {
-        esp_now_register_recv_cb(esp_now_recv_cb_t(onTelemetryReceive));
+    if (validateBootSignature()) {
+        renderBootSignatureStatic();
     }
 
-    renderHUD(rxPacket);
+    // Inicjalizacja odbiornika ESP-NOW
+    WiFi.mode(WIFI_STA);
+    WiFi.disconnect();
+    if (esp_now_init() == ESP_OK) {
+        esp_now_register_recv_cb(esp_now_recv_cb_t(onEspNowRecv));
+    }
+
+    memset(&rxPacket, 0, sizeof(rxPacket));
+    rxPacket.activeModule  = 1;
+    rxPacket.operationMode = 1;
+    rxPacket.frequencyHz   = 433920000UL;
+    rxPacket.rssiDbm       = -93;
 }
 
 void loop() {
-    pollButtons();
-    updateAdvScheduler();
+    handleButtons();
 
-    if (newFrameReady) {
-        newFrameReady = false;
-        renderHUD(rxPacket);
-    } else if ((millis() - lastPacketMs) > 500UL) {
-        renderHUD(rxPacket);
-        delay(20);
+    if (packetReceived) {
+        packetReceived = false;
+        for (int r = 23; r > 0; r--) {
+            memcpy(waterfallBuf[r], waterfallBuf[r - 1], 64);
+        }
+        memcpy(waterfallBuf[0], rxPacket.spectrumBins, 64);
     }
 
-    delay(10);
+    if (millis() - lastRenderMs >= 33) {
+        lastRenderMs = millis();
+        if (currentMode == ClusterMode::MODE_DOCKED_CLUSTER) {
+            renderTacticalHUD();
+        } else {
+            renderLauncherUI();
+        }
+    }
 }
