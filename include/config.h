@@ -11,6 +11,8 @@
 #include <WiFi.h>
 #include <LittleFS.h>
 #include <SPIFFS.h>
+#include <SPI.h>
+#include <SD.h>
 #include <LovyanGFX.hpp>
 #include <esp_ota_ops.h>
 #include <esp_partition.h>
@@ -21,6 +23,11 @@
 #include <cmath>
 #include <cstring>
 
+#define SD_CS_PIN        10
+#define SD_MOSI_PIN      11
+#define SD_MISO_PIN      13
+#define SD_SCK_PIN       12
+
 #define PIN_POWER_ON       15
 #define PIN_BTN_TOP        0
 #define PIN_BTN_BOTTOM     14
@@ -29,6 +36,9 @@
 #define PIN_ADV_DETECT     43
 #define PIN_GROVE_SDA      18
 #define PIN_GROVE_SCL      17
+
+#define ADV_2G4_DISABLED   0
+#define ADV_2G4_ENABLED    1
 
 class LGFX : public lgfx::LGFX_Device {
     lgfx::Panel_ST7789  _panel_instance;
@@ -158,6 +168,12 @@ struct TileModule {
     bool installed;
     float clickScale;
     void (*onActivate)();
+};
+
+struct AdvScheduleItem {
+    uint32_t startAtMs;
+    uint32_t endAtMs;
+    bool enabled;
 };
 
 extern const I18nStrings kI18n[4];
