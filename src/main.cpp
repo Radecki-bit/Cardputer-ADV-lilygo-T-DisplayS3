@@ -21,6 +21,10 @@ uint32_t lastPacketMs = 0;
 uint8_t currentView = 0;
 uint8_t backlightLevel = 180;
 
+bool sdReady = false;
+bool advAntennaEnabled = false;
+AdvScheduleItem advSchedule = {0, 0, false};
+
 static uint8_t peakHold[64] = {0};
 static uint8_t waterfall[64][96] = {{0}};
 
@@ -35,6 +39,111 @@ static const uint16_t COLOR_BLUE = 0x001F;
 static const uint16_t COLOR_MUTED = 0x8410;
 
 LGFX_Sprite canvas(&tft);
+
+bool initSdCard() {
+    SPI.begin(SD_SCK_PIN, SD_MISO_PIN, SD_MOSI_PIN, SD_CS_PIN);
+
+    if (!SD.begin(SD_CS_PIN, SPI)) {
+        Serial.println("[SD] INIT FAILED");
+        return false;
+    }
+
+    if (!SD.exists("/logs")) {
+        SD.mkdir("/logs");
+    }
+
+    if (!SD.exists("/cfg")) {
+        SD.mkdir("/cfg");
+    }
+
+    File bootInfo = SD.open("/logs/boot.log", FILE_WRITE);
+    if (bootInfo) {
+        bootInfo.println("Smolinski|Labs boot");
+        bootInfo.close();
+    }
+
+    sdReady = true;
+    Serial.println("[SD] READY");
+    return true;
+}
+
+void appendSdLog(const String& msg) {
+    if (!sdReady) {
+        return;
+    }
+
+    File logFile = SD.open("/logs/system.log", FILE_APPEND);
+    if (!logFile) {
+        Serial.println("[SD] Cannot open log file");
+        return;
+    }
+
+    logFile.print(millis());
+    logFile.print(" - ");
+    logFile.println(msg);
+    logFile.close();
+}
+
+bool saveTelemetrySnapshot(const TelemetryPacket& pkt) {
+    if (!sdReady) {
+        return false;
+    }
+
+    File f = SD.open("/cfg/last_packet.txt", FILE_WRITE);
+    if (!f) {
+        return false;
+    }
+
+    f.printf("magic=%u\nactiveModule=%u\nfrequencyHz=%lu\nrssiDbm=%d\n",
+             pkt.magic,
+             pkt.activeModule,
+             pkt.frequencyHz,
+             pkt.rssiDbm);
+
+    for (int i = 0; i < 64; ++i) {
+        f.printf("%d%c", pkt.spectrumBins[i], (i == 63) ? '\n' : ',');
+    }
+
+    f.close();
+    return true;
+}
+
+void setAdvAntennaState(bool enabled) {
+    advAntennaEnabled = enabled;
+    pinMode(PIN_ANTENNA_SW, OUTPUT);
+    digitalWrite(PIN_ANTENNA_SW, enabled ? HIGH : LOW);
+}
+
+void scheduleAdvWindow(uint32_t delayMs, uint32_t durationMs, bool enabled) {
+    advSchedule.enabled = enabled;
+    advSchedule.startAtMs = millis() + delayMs;
+    advSchedule.endAtMs = advSchedule.startAtMs + durationMs;
+
+    if (!enabled) {
+        setAdvAntennaState(false);
+    }
+}
+
+void updateAdvScheduler() {
+    if (!advSchedule.enabled) {
+        setAdvAntennaState(false);
+        return;
+    }
+
+    uint32_t now = millis();
+    if (now < advSchedule.startAtMs) {
+        setAdvAntennaState(false);
+        return;
+    }
+
+    if (now < advSchedule.endAtMs) {
+        setAdvAntennaState(true);
+        return;
+    }
+
+    setAdvAntennaState(false);
+    advSchedule.enabled = false;
+}
 
 const char* moduleName(uint8_t module) {
     switch (module) {
@@ -240,6 +349,11 @@ void onTelemetryReceive(const uint8_t* mac, const uint8_t* incomingData, int len
     memcpy(&rxPacket, incomingData, sizeof(TelemetryPacket));
     newFrameReady = true;
     lastPacketMs = millis();
+
+    if (sdReady) {
+        saveTelemetrySnapshot(rxPacket);
+        appendSdLog("telemetry captured");
+    }
 }
 
 void setBrightness(uint8_t value) {
@@ -274,8 +388,14 @@ void setup() {
     pinMode(PIN_BTN_TOP, INPUT_PULLUP);
     pinMode(PIN_BTN_BOTTOM, INPUT_PULLUP);
 
+    pinMode(PIN_ANTENNA_SW, OUTPUT);
+    digitalWrite(PIN_ANTENNA_SW, LOW);
+
     Serial.begin(115200);
     delay(100);
+
+    initSdCard();
+    appendSdLog("system boot");
 
     tft.init();
     tft.setRotation(1);
@@ -302,6 +422,7 @@ void setup() {
 
 void loop() {
     pollButtons();
+    updateAdvScheduler();
 
     if (newFrameReady) {
         newFrameReady = false;
