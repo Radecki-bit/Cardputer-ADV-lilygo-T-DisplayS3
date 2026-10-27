@@ -1,4 +1,4 @@
-#include <Arduino.h>
+#include "../include/config.h"
 #include <SPI.h>
 #include <SD.h>
 #include <Update.h>
@@ -7,21 +7,6 @@
 #include <esp_ota_ops.h>
 #include <esp_partition.h>
 #include <M5Cardputer.h>
-
-#define HYDRA_SCK         40
-#define HYDRA_MISO        39
-#define HYDRA_MOSI        14
-#define CC1101_CS         13
-#define CC1101_GDO0       5
-#define NRF24_CSN         6
-#define NRF24_CE          4
-#define SDCARD_CS         12
-
-#define FREQ_433_92_MHZ   433920000UL
-#define FREQ_868_35_MHZ   868350000UL
-#define RF_SWEEP_POINTS   64U
-#define ESP_NOW_PERIOD_MS 33U
-#define XP_BOOT_TIME_MS   8000UL
 
 enum ActiveModule : uint8_t {
     MODULE_IDLE   = 0,
@@ -34,18 +19,6 @@ enum OperationMode : uint8_t {
     MODE_SPECTRUM = 1,
     MODE_SNIFF    = 2
 };
-
-#pragma pack(push, 1)
-struct TelemetryPacket {
-    uint8_t  magic;
-    uint8_t  activeModule;
-    uint8_t  operationMode;
-    uint32_t frequencyHz;
-    int16_t  rssiDbm;
-    uint8_t  spectrumBins[64];
-    uint8_t  checksum;
-};
-#pragma pack(pop)
 
 SPIClass hydraSPI(HSPI);
 M5Canvas desktopCanvas(&M5Cardputer.Display);
@@ -60,17 +33,14 @@ uint32_t lastRenderMs = 0;
 ActiveModule  activeModule       = MODULE_CC1101;
 OperationMode operationMode      = MODE_SPECTRUM;
 uint32_t      currentFrequencyHz = FREQ_433_92_MHZ;
+uint8_t       advAnt24GState     = ANT_24GHZ_EXTERNAL;
+bool          sdCardMounted      = false;
+uint32_t      sdCardSizeMB       = 0;
 
 bool startMenuOpen    = false;
 bool rfWindowMin      = false;
 int8_t startMenuIndex = 0;
 const int8_t MENU_ITEMS_COUNT = 5;
-
-uint8_t calculateXOR(const uint8_t* data, size_t len) {
-    uint8_t crc = 0;
-    for (size_t i = 0; i < len; i++) crc ^= data[i];
-    return crc;
-}
 
 const char* moduleName(ActiveModule m) {
     switch (m) {
@@ -94,6 +64,11 @@ void isolateHydraBus() {
     digitalWrite(NRF24_CSN, HIGH);
     digitalWrite(SDCARD_CS, HIGH);
     digitalWrite(NRF24_CE,  LOW);
+}
+
+void setAdv24GHzAntennaSwitch(uint8_t state) {
+    advAnt24GState = (state == ANT_24GHZ_EXTERNAL) ? ANT_24GHZ_EXTERNAL : ANT_24GHZ_INTERNAL;
+    digitalWrite(PIN_ADV_ANT_24GHZ, (advAnt24GState == ANT_24GHZ_EXTERNAL) ? HIGH : LOW);
 }
 
 void cc1101WriteReg(uint8_t reg, uint8_t val) {
@@ -139,13 +114,15 @@ uint8_t nrf24ReadReg(uint8_t reg) {
     return val;
 }
 
-void initHydraSPI() {
+void initHydraSPIAndSD() {
     pinMode(CC1101_CS, OUTPUT);
     pinMode(NRF24_CSN, OUTPUT);
     pinMode(SDCARD_CS, OUTPUT);
     pinMode(NRF24_CE,  OUTPUT);
     pinMode(CC1101_GDO0, INPUT);
+    pinMode(PIN_ADV_ANT_24GHZ, OUTPUT);
 
+    setAdv24GHzAntennaSwitch(ANT_24GHZ_EXTERNAL);
     isolateHydraBus();
     hydraSPI.begin(HYDRA_SCK, HYDRA_MISO, HYDRA_MOSI, -1);
 
@@ -160,6 +137,31 @@ void initHydraSPI() {
     nrf24WriteReg(0x01, 0x00);
     nrf24WriteReg(0x06, 0x0F);
     hydraSPI.endTransaction();
+
+    isolateHydraBus();
+    sdCardMounted = SD.begin(SDCARD_CS, hydraSPI, 16000000);
+    if (sdCardMounted) {
+        sdCardSizeMB = (uint32_t)(SD.cardSize() / (1024ULL * 1024ULL));
+    }
+    isolateHydraBus();
+}
+
+void saveTelemetryLogToSD() {
+    isolateHydraBus();
+    if (!sdCardMounted) {
+        sdCardMounted = SD.begin(SDCARD_CS, hydraSPI, 16000000);
+    }
+    if (sdCardMounted) {
+        File logFile = SD.open("/hydra_rf.log", FILE_APPEND);
+        if (logFile) {
+            logFile.printf("[%lu ms] MOD:%s FREQ:%lu RSSI:%d dBm ANT24G:%s\n",
+                           millis(), moduleName(activeModule), currentFrequencyHz,
+                           txPacket.rssiDbm,
+                           (advAnt24GState == ANT_24GHZ_EXTERNAL) ? "EXT" : "INT");
+            logFile.close();
+        }
+    }
+    isolateHydraBus();
 }
 
 void initEspNowLink() {
@@ -197,7 +199,7 @@ void bootIntoBruce() {
 
     isolateHydraBus();
 
-    if (SD.begin(SDCARD_CS, hydraSPI, 16000000)) {
+    if (sdCardMounted || SD.begin(SDCARD_CS, hydraSPI, 16000000)) {
         const char* paths[] = {"/bruce.bin", "/firmware/bruce.bin", "/Bruce.bin"};
         for (const char* path : paths) {
             if (SD.exists(path)) {
@@ -348,7 +350,10 @@ void renderWindowsXPDesktop() {
         desktopCanvas.printf("Mode: %s | %lu.%02luMHz", modeName(operationMode), currentFrequencyHz / 1000000UL, (currentFrequencyHz % 1000000UL) / 10000UL);
 
         desktopCanvas.setCursor(winX + 6, winY + 42);
-        desktopCanvas.printf("Peak: %d dBm | Link: ESP-NOW", txPacket.rssiDbm);
+        desktopCanvas.printf("RSSI:%ddBm SD:%s 2.4G:%s",
+                             txPacket.rssiDbm,
+                             sdCardMounted ? "OK" : "--",
+                             (advAnt24GState == ANT_24GHZ_EXTERNAL) ? "EXT" : "INT");
 
         const int scopeX = winX + 6, scopeY = winY + 53, scopeW = 180, scopeH = 44;
         desktopCanvas.fillRect(scopeX, scopeY, scopeW, scopeH, TFT_BLACK);
@@ -410,7 +415,7 @@ void renderWindowsXPDesktop() {
 
     desktopCanvas.fillRoundRect(50, tbY + 2, 112, 14, 2, 0x24BE);
     desktopCanvas.setCursor(55, tbY + 5);
-    desktopCanvas.printf("[M]Menu [1/2]RF [B]Br");
+    desktopCanvas.printf("[M]Menu [A]Ant [B]Br");
 
     desktopCanvas.fillRect(166, tbY + 1, 74, 17, 0x0C5E);
     uint32_t upSec = millis() / 1000;
@@ -476,6 +481,8 @@ void sendTelemetry() {
     txPacket.activeModule  = activeModule;
     txPacket.operationMode = operationMode;
     txPacket.frequencyHz   = currentFrequencyHz;
+    txPacket.ant24GState   = advAnt24GState;
+    txPacket.sdStatus      = sdCardMounted ? 1 : 0;
     txPacket.checksum      = calculateXOR((const uint8_t*)&txPacket, sizeof(TelemetryPacket) - 1);
     esp_now_send(broadcastAddress, (const uint8_t*)&txPacket, sizeof(TelemetryPacket));
 }
@@ -509,6 +516,8 @@ void handleKeyboard() {
             case '1': activeModule = MODULE_CC1101; break;
             case '2': activeModule = MODULE_NRF24; break;
             case 'f': case 'F': currentFrequencyHz = (currentFrequencyHz == FREQ_433_92_MHZ) ? FREQ_868_35_MHZ : FREQ_433_92_MHZ; break;
+            case 'a': case 'A': setAdv24GHzAntennaSwitch(advAnt24GState == ANT_24GHZ_EXTERNAL ? ANT_24GHZ_INTERNAL : ANT_24GHZ_EXTERNAL); break;
+            case 's': case 'S': saveTelemetryLogToSD(); break;
             case 'w': case 'W': rfWindowMin = !rfWindowMin; break;
             case 'b': case 'B': bootIntoBruce(); break;
         }
@@ -516,6 +525,8 @@ void handleKeyboard() {
     txPacket.activeModule  = activeModule;
     txPacket.operationMode = operationMode;
     txPacket.frequencyHz   = currentFrequencyHz;
+    txPacket.ant24GState   = advAnt24GState;
+    txPacket.sdStatus      = sdCardMounted ? 1 : 0;
 }
 
 void setup() {
@@ -527,7 +538,7 @@ void setup() {
     desktopCanvas.setColorDepth(16);
     desktopCanvas.createSprite(240, 135);
 
-    initHydraSPI();
+    initHydraSPIAndSD();
     initEspNowLink();
 
     memset(&txPacket, 0, sizeof(txPacket));
@@ -536,6 +547,8 @@ void setup() {
     txPacket.operationMode = operationMode;
     txPacket.frequencyHz   = currentFrequencyHz;
     txPacket.rssiDbm       = -93;
+    txPacket.ant24GState   = advAnt24GState;
+    txPacket.sdStatus      = sdCardMounted ? 1 : 0;
 
     runWindowsXPBootScreen(XP_BOOT_TIME_MS);
 }

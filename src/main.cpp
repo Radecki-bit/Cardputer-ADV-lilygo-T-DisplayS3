@@ -1,9 +1,5 @@
-#define SYSTEM_AUTHOR "@whoami"
-#define SYSTEM_PROJECT "Smolinski|Labs Launcher"
-#define FIRMWARE_VERSION "v1.0.8-PROTOTYPE"
 #define LGFX_USE_V1
-
-#include <Arduino.h>
+#include "../include/config.h"
 #include <Wire.h>
 #include <WiFi.h>
 #include <esp_now.h>
@@ -12,17 +8,6 @@
 #include <SPI.h>
 #include <SD.h>
 #include <LovyanGFX.hpp>
-
-#define SD_CS_PIN        10
-#define SD_MOSI_PIN      11
-#define SD_MISO_PIN      13
-#define SD_SCK_PIN       12
-
-#define PIN_POWER_ON       15
-#define PIN_BTN_TOP        0
-#define PIN_BTN_BOTTOM     14
-#define PIN_LCD_BL         38
-#define PIN_ANTENNA_SW     16
 
 class LGFX : public lgfx::LGFX_Device {
     lgfx::Panel_ST7789  _panel_instance;
@@ -134,23 +119,13 @@ TileModule tiles[8] = {
     {ModuleID::MOD_SETTINGS, 0xCE79, true}
 };
 
-LangID currentLang      = LangID::LANG_PL;
-ClusterMode currentMode = ClusterMode::MODE_DOCKED_CLUSTER;
-uint8_t selectedTile    = 0;
-bool sdMounted          = false;
-bool waterfallMode      = false;
-
-#pragma pack(push, 1)
-struct TelemetryPacket {
-    uint8_t  magic;
-    uint8_t  activeModule;
-    uint8_t  operationMode;
-    uint32_t frequencyHz;
-    int16_t  rssiDbm;
-    uint8_t  spectrumBins[64];
-    uint8_t  checksum;
-};
-#pragma pack(pop)
+LangID currentLang       = LangID::LANG_PL;
+ClusterMode currentMode  = ClusterMode::MODE_DOCKED_CLUSTER;
+uint8_t selectedTile     = 0;
+bool sdMounted           = false;
+uint32_t sdSizeMB        = 0;
+uint8_t localAnt24GState = ANT_24GHZ_EXTERNAL;
+bool waterfallMode       = false;
 
 TelemetryPacket rxPacket;
 volatile bool packetReceived = false;
@@ -163,10 +138,20 @@ uint32_t btnBotPressMs       = 0;
 bool btnTopLast              = true;
 bool btnBotLast              = true;
 
-uint8_t calculateXOR(const uint8_t* data, size_t len) {
-    uint8_t crc = 0;
-    for (size_t i = 0; i < len; i++) crc ^= data[i];
-    return crc;
+void setReserved24GHzAntenna(uint8_t state) {
+    localAnt24GState = (state == ANT_24GHZ_EXTERNAL) ? ANT_24GHZ_EXTERNAL : ANT_24GHZ_INTERNAL;
+    digitalWrite(PIN_ANTENNA_SW, (localAnt24GState == ANT_24GHZ_EXTERNAL) ? HIGH : LOW);
+}
+
+void logSnapshotToSD() {
+    if (!sdMounted) return;
+    File f = SD.open("/tdisplay_rf.log", FILE_APPEND);
+    if (f) {
+        f.printf("[%lu ms] FREQ:%lu Hz RSSI:%d dBm ANT24G:%s\n",
+                 millis(), rxPacket.frequencyHz, rxPacket.rssiDbm,
+                 (localAnt24GState == ANT_24GHZ_EXTERNAL) ? "EXT" : "INT");
+        f.close();
+    }
 }
 
 uint16_t thermalColor565(uint8_t val) {
@@ -180,6 +165,7 @@ void onEspNowRecv(const uint8_t*, const uint8_t* incomingData, int len) {
     if (len == sizeof(TelemetryPacket) && incomingData[0] == 0xA5) {
         if (calculateXOR(incomingData, sizeof(TelemetryPacket) - 1) == incomingData[sizeof(TelemetryPacket) - 1]) {
             memcpy(&rxPacket, incomingData, sizeof(TelemetryPacket));
+            setReserved24GHzAntenna(rxPacket.ant24GState);
             lastPacketMs   = millis();
             packetReceived = true;
         }
@@ -193,13 +179,19 @@ bool validateBootSignature() {
 void renderBootSignatureStatic() {
     tft.fillScreen(TFT_BLACK);
     tft.setTextColor(0x07E0, TFT_BLACK);
-    tft.setCursor(12, 55);
+    tft.setCursor(12, 50);
     tft.setTextSize(2);
     tft.printf("%s\n", SYSTEM_PROJECT);
     tft.setTextSize(1);
-    tft.setCursor(12, 82);
+    tft.setCursor(12, 78);
     tft.setTextColor(0xFFE0, TFT_BLACK);
-    tft.printf("AUTH: %s | %s | SD: %s", SYSTEM_AUTHOR, FIRMWARE_VERSION, sdMounted ? "OK" : "NO");
+    if (sdMounted) {
+        tft.printf("AUTH: %s | SD: %luMB | 2.4G:%s", SYSTEM_AUTHOR, sdSizeMB,
+                   (localAnt24GState == ANT_24GHZ_EXTERNAL) ? "EXT" : "INT");
+    } else {
+        tft.printf("AUTH: %s | SD: NO | 2.4G:%s", SYSTEM_AUTHOR,
+                   (localAnt24GState == ANT_24GHZ_EXTERNAL) ? "EXT" : "INT");
+    }
     delay(600);
 }
 
@@ -229,8 +221,11 @@ void renderLauncherUI() {
 
     bool linkAlive = (millis() - lastPacketMs < 1000) && (lastPacketMs > 0);
     canvas.setTextColor(linkAlive ? 0x07E0 : 0xFBE0);
-    canvas.setCursor(220, 8);
-    canvas.printf("SD:%s %s", sdMounted ? "OK" : "--", linkAlive ? s.active : "LOCAL");
+    canvas.setCursor(192, 8);
+    canvas.printf("SD:%s 2.4G:%s %s",
+                  sdMounted ? "OK" : "--",
+                  (localAnt24GState == ANT_24GHZ_EXTERNAL) ? "EXT" : "INT",
+                  linkAlive ? "LINK" : "LOC");
 
     for (int i = 0; i < 8; i++) {
         int col = i % GRID_COLS;
@@ -301,7 +296,11 @@ void renderTacticalHUD() {
 
     canvas.setTextColor(0x7BEF);
     canvas.setCursor(6, 158);
-    canvas.printf("TOP: %s | BOT: UI | %s", waterfallMode ? "WATERFALL" : "SPECTRUM", SYSTEM_AUTHOR);
+    canvas.printf("TOP:%s | 2.4G:%s | SD:%s | %s",
+                  waterfallMode ? "WFALL" : "SPEC",
+                  (localAnt24GState == ANT_24GHZ_EXTERNAL) ? "EXT" : "INT",
+                  sdMounted ? "OK" : "--",
+                  SYSTEM_AUTHOR);
     canvas.pushSprite(0, 0);
 }
 
@@ -310,9 +309,15 @@ void handleButtons() {
     bool botNow = digitalRead(PIN_BTN_BOTTOM);
 
     if (!topNow && btnTopLast) btnTopPressMs = millis();
-    else if (topNow && !btnTopLast && (millis() - btnTopPressMs > 30)) {
-        if (currentMode == ClusterMode::MODE_DOCKED_CLUSTER) waterfallMode = !waterfallMode;
-        else selectedTile = (selectedTile + 1) % 8;
+    else if (topNow && !btnTopLast) {
+        uint32_t held = millis() - btnTopPressMs;
+        if (held > 600) {
+            setReserved24GHzAntenna(localAnt24GState == ANT_24GHZ_EXTERNAL ? ANT_24GHZ_INTERNAL : ANT_24GHZ_EXTERNAL);
+            logSnapshotToSD();
+        } else if (held > 30) {
+            if (currentMode == ClusterMode::MODE_DOCKED_CLUSTER) waterfallMode = !waterfallMode;
+            else selectedTile = (selectedTile + 1) % 8;
+        }
     }
     btnTopLast = topNow;
 
@@ -329,7 +334,7 @@ void setup() {
     pinMode(PIN_POWER_ON, OUTPUT);
     digitalWrite(PIN_POWER_ON, HIGH);
     pinMode(PIN_ANTENNA_SW, OUTPUT);
-    digitalWrite(PIN_ANTENNA_SW, HIGH);
+    setReserved24GHzAntenna(ANT_24GHZ_EXTERNAL);
     pinMode(PIN_BTN_TOP, INPUT_PULLUP);
     pinMode(PIN_BTN_BOTTOM, INPUT_PULLUP);
 
@@ -343,6 +348,9 @@ void setup() {
 
     sdSPI.begin(SD_SCK_PIN, SD_MISO_PIN, SD_MOSI_PIN, SD_CS_PIN);
     sdMounted = SD.begin(SD_CS_PIN, sdSPI, 16000000);
+    if (sdMounted) {
+        sdSizeMB = (uint32_t)(SD.cardSize() / (1024ULL * 1024ULL));
+    }
 
     if (validateBootSignature()) renderBootSignatureStatic();
 
@@ -351,10 +359,12 @@ void setup() {
     if (esp_now_init() == ESP_OK) esp_now_register_recv_cb(esp_now_recv_cb_t(onEspNowRecv));
 
     memset(&rxPacket, 0, sizeof(rxPacket));
-    rxPacket.activeModule = 1;
+    rxPacket.activeModule  = 1;
     rxPacket.operationMode = 1;
-    rxPacket.frequencyHz = 433920000UL;
-    rxPacket.rssiDbm = -93;
+    rxPacket.frequencyHz   = FREQ_433_92_MHZ;
+    rxPacket.rssiDbm       = -93;
+    rxPacket.ant24GState   = localAnt24GState;
+    rxPacket.sdStatus      = sdMounted ? 1 : 0;
 }
 
 void loop() {
