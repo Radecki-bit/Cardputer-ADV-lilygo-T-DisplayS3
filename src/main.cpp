@@ -123,10 +123,13 @@ LangID currentLang       = LangID::LANG_PL;
 ClusterMode currentMode  = ClusterMode::MODE_DOCKED_CLUSTER;
 uint8_t selectedTile     = 0;
 bool sdMounted           = false;
+bool protoLoaded         = false;
 uint32_t sdSizeMB        = 0;
 uint8_t localAnt24GState = ANT_24GHZ_EXTERNAL;
 bool waterfallMode       = false;
 
+EspNowProtocolHeader activeProtoS3;
+EspNowProtocolHeader activeProtoEsp32U;
 TelemetryPacket rxPacket;
 volatile bool packetReceived = false;
 uint32_t lastPacketMs        = 0;
@@ -147,9 +150,10 @@ void logSnapshotToSD() {
     if (!sdMounted) return;
     File f = SD.open("/tdisplay_rf.log", FILE_APPEND);
     if (f) {
-        f.printf("[%lu ms] FREQ:%lu Hz RSSI:%d dBm ANT24G:%s\n",
+        f.printf("[%lu ms] FREQ:%lu Hz RSSI:%d dBm ANT24G:%s PROTO:%s\n",
                  millis(), rxPacket.frequencyHz, rxPacket.rssiDbm,
-                 (localAnt24GState == ANT_24GHZ_EXTERNAL) ? "EXT" : "INT");
+                 (localAnt24GState == ANT_24GHZ_EXTERNAL) ? "EXT" : "INT",
+                 protoLoaded ? "SMRA_OK" : "DEF");
         f.close();
     }
 }
@@ -186,7 +190,8 @@ void renderBootSignatureStatic() {
     tft.setCursor(12, 78);
     tft.setTextColor(0xFFE0, TFT_BLACK);
     if (sdMounted) {
-        tft.printf("AUTH: %s | SD: %luMB | 2.4G:%s", SYSTEM_AUTHOR, sdSizeMB,
+        tft.printf("AUTH:%s | SD:%luMB | PROTO:%s | 2.4G:%s", SYSTEM_AUTHOR, sdSizeMB,
+                   protoLoaded ? "S3+32U" : "CFG",
                    (localAnt24GState == ANT_24GHZ_EXTERNAL) ? "EXT" : "INT");
     } else {
         tft.printf("AUTH: %s | SD: NO | 2.4G:%s", SYSTEM_AUTHOR,
@@ -339,6 +344,8 @@ void setup() {
     pinMode(PIN_BTN_BOTTOM, INPUT_PULLUP);
 
     Serial.begin(115200);
+    Serial1.begin(115200, SERIAL_8N1, PIN_TDISPLAY_GROVE_RX, PIN_TDISPLAY_GROVE_TX);
+
     tft.init();
     tft.setRotation(3);
     tft.setBrightness(220);
@@ -350,6 +357,26 @@ void setup() {
     sdMounted = SD.begin(SD_CS_PIN, sdSPI, 16000000);
     if (sdMounted) {
         sdSizeMB = (uint32_t)(SD.cardSize() / (1024ULL * 1024ULL));
+        provisionDefaultSDConfigs();
+
+        bool okS3  = loadEspNowProtocolBin("/protocols/espnow_tdisplay_s3.bin", activeProtoS3);
+        bool ok32U = loadEspNowProtocolBin("/protocols/espnow_esp32_u.bin", activeProtoEsp32U);
+        protoLoaded = (okS3 && ok32U);
+
+        String antCfg = readCfgValue("/config/tdisplay_s3.cfg", "ant_24ghz_mode", "EXT");
+        setReserved24GHzAntenna(antCfg == "INT" ? ANT_24GHZ_INTERNAL : ANT_24GHZ_EXTERNAL);
+
+        int langCfg = readCfgValue("/config/tdisplay_s3.cfg", "language_id", "3").toInt();
+        currentLang = static_cast<LangID>(constrain(langCfg, 0, 3));
+
+        int modeCfg = readCfgValue("/config/tdisplay_s3.cfg", "cluster_mode", "1").toInt();
+        currentMode = (modeCfg == 0) ? ClusterMode::MODE_STANDALONE_UI : ClusterMode::MODE_DOCKED_CLUSTER;
+
+        int wfCfg = readCfgValue("/config/tdisplay_s3.cfg", "waterfall_default", "0").toInt();
+        waterfallMode = (wfCfg == 1);
+
+        int blCfg = readCfgValue("/config/tdisplay_s3.cfg", "lcd_brightness", "220").toInt();
+        tft.setBrightness(constrain(blCfg, 20, 255));
     }
 
     if (validateBootSignature()) renderBootSignatureStatic();

@@ -23,6 +23,8 @@ enum OperationMode : uint8_t {
 SPIClass hydraSPI(HSPI);
 M5Canvas desktopCanvas(&M5Cardputer.Display);
 
+EspNowProtocolHeader advProtoS3;
+EspNowProtocolHeader advProtoEsp32U;
 TelemetryPacket txPacket;
 uint8_t broadcastAddress[] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
 esp_now_peer_info_t peerInfo;
@@ -34,7 +36,9 @@ ActiveModule  activeModule       = MODULE_CC1101;
 OperationMode operationMode      = MODE_SPECTRUM;
 uint32_t      currentFrequencyHz = FREQ_433_92_MHZ;
 uint8_t       advAnt24GState     = ANT_24GHZ_EXTERNAL;
+uint8_t       espNowChannel      = 1;
 bool          sdCardMounted      = false;
+bool          protocolsVerified  = false;
 uint32_t      sdCardSizeMB       = 0;
 
 bool startMenuOpen    = false;
@@ -142,6 +146,26 @@ void initHydraSPIAndSD() {
     sdCardMounted = SD.begin(SDCARD_CS, hydraSPI, 16000000);
     if (sdCardMounted) {
         sdCardSizeMB = (uint32_t)(SD.cardSize() / (1024ULL * 1024ULL));
+        provisionDefaultSDConfigs();
+
+        bool okS3  = loadEspNowProtocolBin("/protocols/espnow_tdisplay_s3.bin", advProtoS3);
+        bool ok32U = loadEspNowProtocolBin("/protocols/espnow_esp32_u.bin", advProtoEsp32U);
+        protocolsVerified = (okS3 && ok32U);
+
+        int modCfg = readCfgValue("/config/adv_master.cfg", "active_module", "1").toInt();
+        activeModule = static_cast<ActiveModule>(constrain(modCfg, 0, 2));
+
+        int modeCfg = readCfgValue("/config/adv_master.cfg", "operation_mode", "1").toInt();
+        operationMode = static_cast<OperationMode>(constrain(modeCfg, 0, 2));
+
+        uint32_t freqCfg = (uint32_t)readCfgValue("/config/adv_master.cfg", "default_freq_hz", "433920000").toInt();
+        if (freqCfg >= 300000000UL && freqCfg <= 928000000UL) currentFrequencyHz = freqCfg;
+
+        String antCfg = readCfgValue("/config/adv_master.cfg", "ant_24ghz_mode", "EXT");
+        setAdv24GHzAntennaSwitch(antCfg == "INT" ? ANT_24GHZ_INTERNAL : ANT_24GHZ_EXTERNAL);
+
+        int chCfg = readCfgValue("/config/adv_master.cfg", "espnow_channel", "1").toInt();
+        espNowChannel = (uint8_t)constrain(chCfg, 1, 13);
     }
     isolateHydraBus();
 }
@@ -154,10 +178,11 @@ void saveTelemetryLogToSD() {
     if (sdCardMounted) {
         File logFile = SD.open("/hydra_rf.log", FILE_APPEND);
         if (logFile) {
-            logFile.printf("[%lu ms] MOD:%s FREQ:%lu RSSI:%d dBm ANT24G:%s\n",
+            logFile.printf("[%lu ms] MOD:%s FREQ:%lu RSSI:%d dBm ANT24G:%s PROTO:%s\n",
                            millis(), moduleName(activeModule), currentFrequencyHz,
                            txPacket.rssiDbm,
-                           (advAnt24GState == ANT_24GHZ_EXTERNAL) ? "EXT" : "INT");
+                           (advAnt24GState == ANT_24GHZ_EXTERNAL) ? "EXT" : "INT",
+                           protocolsVerified ? "S3+32U_OK" : "DEFAULT");
             logFile.close();
         }
     }
@@ -172,7 +197,7 @@ void initEspNowLink() {
     if (esp_now_init() == ESP_OK) {
         memset(&peerInfo, 0, sizeof(peerInfo));
         memcpy(peerInfo.peer_addr, broadcastAddress, 6);
-        peerInfo.channel = 1;
+        peerInfo.channel = espNowChannel;
         peerInfo.encrypt = false;
         esp_now_add_peer(&peerInfo);
     }
@@ -200,7 +225,8 @@ void bootIntoBruce() {
     isolateHydraBus();
 
     if (sdCardMounted || SD.begin(SDCARD_CS, hydraSPI, 16000000)) {
-        const char* paths[] = {"/bruce.bin", "/firmware/bruce.bin", "/Bruce.bin"};
+        String customBruce = readCfgValue("/config/adv_master.cfg", "bruce_bin_path", "/firmware/bruce.bin");
+        const char* paths[] = {customBruce.c_str(), "/bruce.bin", "/firmware/bruce.bin", "/Bruce.bin"};
         for (const char* path : paths) {
             if (SD.exists(path)) {
                 File bin = SD.open(path, FILE_READ);
