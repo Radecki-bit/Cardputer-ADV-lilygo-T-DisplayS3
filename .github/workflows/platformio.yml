@@ -1,0 +1,26 @@
+name: PlatformIO CI
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout repository (Native Git - Zero Node.js)
+        run: |
+          git init .
+          git remote add origin "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git"
+          git fetch --depth=1 origin "${{ github.sha }}"
+          git checkout FETCH_HEAD
+
+      - name: Build Dual-MCU Firmware (PlatformIO)
+        run: |
+          python3 -m venv /tmp/pio-env
+          /tmp/pio-env/bin/pip install --upgrade pip platformio
+          /tmp/pio-env/bin/pio run -e lilygo-t-display-s3
+          /tmp/pio-env/bin/pio run -e m5stack-cardputer-adv
