@@ -3,8 +3,6 @@
 #include <Wire.h>
 #include <WiFi.h>
 #include <esp_now.h>
-#include <LittleFS.h>
-#include <SPIFFS.h>
 #include <SPI.h>
 #include <SD.h>
 #include <LovyanGFX.hpp>
@@ -67,7 +65,9 @@ public:
     bool init_impl(bool use_reset, bool use_clear) override {
         pinMode(PIN_POWER_ON, OUTPUT);
         digitalWrite(PIN_POWER_ON, HIGH);
-        delay(10);
+        pinMode(PIN_LCD_BL, OUTPUT);
+        digitalWrite(PIN_LCD_BL, HIGH);
+        delay(20);
         return lgfx::LGFX_Device::init_impl(use_reset, use_clear);
     }
 };
@@ -125,35 +125,38 @@ uint8_t selectedTile     = 0;
 bool sdMounted           = false;
 bool protoLoaded         = false;
 uint32_t sdSizeMB        = 0;
-uint8_t localAnt24GState = ANT_24GHZ_EXTERNAL;
+uint8_t localAnt24GState = ANT_24GHZ_OFF; // Domyślnie WYŁĄCZONA (0V na GPIO 16)
 bool waterfallMode       = false;
+uint32_t antBannerUntil  = 0;
 
 EspNowProtocolHeader activeProtoS3;
-EspNowProtocolHeader activeProtoEsp32U;
 TelemetryPacket rxPacket;
 volatile bool packetReceived = false;
 uint32_t lastPacketMs        = 0;
 uint8_t peakHold[64]         = {0};
 uint8_t waterfallBuf[24][64] = {{0}};
 uint32_t lastRenderMs        = 0;
+
+// Obsługa przycisków i detekcja dwukliku na GPIO 14 (PIN_BTN_BOTTOM)
 uint32_t btnTopPressMs       = 0;
 uint32_t btnBotPressMs       = 0;
 bool btnTopLast              = true;
 bool btnBotLast              = true;
+uint8_t btnBotClickCount     = 0;
+uint32_t btnBotFirstClickMs  = 0;
 
 void setReserved24GHzAntenna(uint8_t state) {
-    localAnt24GState = (state == ANT_24GHZ_EXTERNAL) ? ANT_24GHZ_EXTERNAL : ANT_24GHZ_INTERNAL;
-    digitalWrite(PIN_ANTENNA_SW, (localAnt24GState == ANT_24GHZ_EXTERNAL) ? HIGH : LOW);
+    localAnt24GState = (state == ANT_24GHZ_ON) ? ANT_24GHZ_ON : ANT_24GHZ_OFF;
+    digitalWrite(PIN_ANTENNA_SW, (localAnt24GState == ANT_24GHZ_ON) ? HIGH : LOW);
 }
 
 void logSnapshotToSD() {
     if (!sdMounted) return;
     File f = SD.open("/tdisplay_rf.log", FILE_APPEND);
     if (f) {
-        f.printf("[%lu ms] FREQ:%lu Hz RSSI:%d dBm ANT24G:%s PROTO:%s\n",
+        f.printf("[%lu ms] FREQ:%lu Hz RSSI:%d dBm ANT24G:%s\n",
                  millis(), rxPacket.frequencyHz, rxPacket.rssiDbm,
-                 (localAnt24GState == ANT_24GHZ_EXTERNAL) ? "EXT" : "INT",
-                 protoLoaded ? "SMRA_OK" : "DEF");
+                 (localAnt24GState == ANT_24GHZ_ON) ? "ON" : "OFF");
         f.close();
     }
 }
@@ -168,36 +171,32 @@ uint16_t thermalColor565(uint8_t val) {
 void onEspNowRecv(const uint8_t*, const uint8_t* incomingData, int len) {
     if (len == sizeof(TelemetryPacket) && incomingData[0] == 0xA5) {
         if (calculateXOR(incomingData, sizeof(TelemetryPacket) - 1) == incomingData[sizeof(TelemetryPacket) - 1]) {
+            uint8_t prevRemoteAnt = rxPacket.ant24GState;
             memcpy(&rxPacket, incomingData, sizeof(TelemetryPacket));
-            setReserved24GHzAntenna(rxPacket.ant24GState);
+            if (rxPacket.ant24GState != prevRemoteAnt) {
+                setReserved24GHzAntenna(rxPacket.ant24GState);
+                antBannerUntil = millis() + 1500;
+            }
             lastPacketMs   = millis();
             packetReceived = true;
         }
     }
 }
 
-bool validateBootSignature() {
-    return (strcmp(SYSTEM_AUTHOR, "@whoami") == 0);
-}
-
 void renderBootSignatureStatic() {
     tft.fillScreen(TFT_BLACK);
     tft.setTextColor(0x07E0, TFT_BLACK);
-    tft.setCursor(12, 50);
+    tft.setCursor(12, 42);
     tft.setTextSize(2);
     tft.printf("%s\n", SYSTEM_PROJECT);
     tft.setTextSize(1);
-    tft.setCursor(12, 78);
+    tft.setCursor(12, 74);
     tft.setTextColor(0xFFE0, TFT_BLACK);
-    if (sdMounted) {
-        tft.printf("AUTH:%s | SD:%luMB | PROTO:%s | 2.4G:%s", SYSTEM_AUTHOR, sdSizeMB,
-                   protoLoaded ? "S3+32U" : "CFG",
-                   (localAnt24GState == ANT_24GHZ_EXTERNAL) ? "EXT" : "INT");
-    } else {
-        tft.printf("AUTH: %s | SD: NO | 2.4G:%s", SYSTEM_AUTHOR,
-                   (localAnt24GState == ANT_24GHZ_EXTERNAL) ? "EXT" : "INT");
-    }
-    delay(600);
+    tft.printf("AUTH: %s | %s | SD: %s", SYSTEM_AUTHOR, FIRMWARE_VERSION, sdMounted ? "OK" : "NO");
+    tft.setCursor(12, 92);
+    tft.setTextColor(0x07FF, TFT_BLACK);
+    tft.printf("GNIAZDO 2.4GHz: WYLACZONE (SAFE 0V) -> 2x KLIK IO14 = ON");
+    delay(900);
 }
 
 const char* getTileTitle(ModuleID id, const I18nStrings& s) {
@@ -214,6 +213,20 @@ const char* getTileTitle(ModuleID id, const I18nStrings& s) {
     }
 }
 
+void drawAntPopupIfActive() {
+    if (millis() < antBannerUntil) {
+        uint16_t bg = (localAnt24GState == ANT_24GHZ_ON) ? 0x03E0 : 0x7800;
+        canvas.fillRoundRect(45, 62, 230, 44, 6, bg);
+        canvas.drawRoundRect(45, 62, 230, 44, 6, TFT_WHITE);
+        canvas.setTextColor(TFT_WHITE);
+        canvas.setTextSize(1);
+        canvas.setCursor(58, 72);
+        canvas.printf("GNIAZDO ANTENY 2.4GHz (GPIO 16):");
+        canvas.setCursor(58, 88);
+        canvas.printf("STATUS: %s", (localAnt24GState == ANT_24GHZ_ON) ? "WLACZONE (ON - 3.3V)" : "WYLACZONE (OFF - 0V)");
+    }
+}
+
 void renderLauncherUI() {
     canvas.fillSprite(0x0841);
     const I18nStrings& s = kI18n[static_cast<uint8_t>(currentLang)];
@@ -225,12 +238,12 @@ void renderLauncherUI() {
     canvas.printf("%s [%s]", SYSTEM_PROJECT, SYSTEM_AUTHOR);
 
     bool linkAlive = (millis() - lastPacketMs < 1000) && (lastPacketMs > 0);
-    canvas.setTextColor(linkAlive ? 0x07E0 : 0xFBE0);
-    canvas.setCursor(192, 8);
-    canvas.printf("SD:%s 2.4G:%s %s",
+    canvas.setTextColor((localAnt24GState == ANT_24GHZ_ON) ? 0x07E0 : 0xF800);
+    canvas.setCursor(185, 8);
+    canvas.printf("2.4G:%s SD:%s %s",
+                  (localAnt24GState == ANT_24GHZ_ON) ? "ON" : "OFF",
                   sdMounted ? "OK" : "--",
-                  (localAnt24GState == ANT_24GHZ_EXTERNAL) ? "EXT" : "INT",
-                  linkAlive ? "LINK" : "LOC");
+                  linkAlive ? "LNK" : "LOC");
 
     for (int i = 0; i < 8; i++) {
         int col = i % GRID_COLS;
@@ -246,6 +259,7 @@ void renderLauncherUI() {
         canvas.setCursor(x + 8, y + 42);
         canvas.printf("%s", getTileTitle(tiles[i].id, s));
     }
+    drawAntPopupIfActive();
     canvas.pushSprite(0, 0);
 }
 
@@ -299,56 +313,84 @@ void renderTacticalHUD() {
         }
     }
 
-    canvas.setTextColor(0x7BEF);
+    canvas.setTextColor((localAnt24GState == ANT_24GHZ_ON) ? 0x07E0 : 0x7BEF);
     canvas.setCursor(6, 158);
-    canvas.printf("TOP:%s | 2.4G:%s | SD:%s | %s",
+    canvas.printf("2xKLIK:2.4G[%s] | TOP:%s | SD:%s | %s",
+                  (localAnt24GState == ANT_24GHZ_ON) ? "ON" : "OFF",
                   waterfallMode ? "WFALL" : "SPEC",
-                  (localAnt24GState == ANT_24GHZ_EXTERNAL) ? "EXT" : "INT",
                   sdMounted ? "OK" : "--",
                   SYSTEM_AUTHOR);
+    drawAntPopupIfActive();
     canvas.pushSprite(0, 0);
 }
 
 void handleButtons() {
+    uint32_t now = millis();
     bool topNow = digitalRead(PIN_BTN_TOP);
     bool botNow = digitalRead(PIN_BTN_BOTTOM);
 
-    if (!topNow && btnTopLast) btnTopPressMs = millis();
+    // Przycisk BOOT (GPIO 0) - zmiana trybu wykresu / kafelka
+    if (!topNow && btnTopLast) btnTopPressMs = now;
     else if (topNow && !btnTopLast) {
-        uint32_t held = millis() - btnTopPressMs;
-        if (held > 600) {
-            setReserved24GHzAntenna(localAnt24GState == ANT_24GHZ_EXTERNAL ? ANT_24GHZ_INTERNAL : ANT_24GHZ_EXTERNAL);
-            logSnapshotToSD();
-        } else if (held > 30) {
+        uint32_t held = now - btnTopPressMs;
+        if (held > 30) {
             if (currentMode == ClusterMode::MODE_DOCKED_CLUSTER) waterfallMode = !waterfallMode;
             else selectedTile = (selectedTile + 1) % 8;
         }
     }
     btnTopLast = topNow;
 
-    if (!botNow && btnBotLast) btnBotPressMs = millis();
-    else if (botNow && !btnBotLast) {
-        uint32_t held = millis() - btnBotPressMs;
-        if (held > 600) currentLang = static_cast<LangID>((static_cast<uint8_t>(currentLang) + 1) % 4);
-        else if (held > 30) currentMode = (currentMode == ClusterMode::MODE_DOCKED_CLUSTER) ? ClusterMode::MODE_STANDALONE_UI : ClusterMode::MODE_DOCKED_CLUSTER;
+    // Drugi przycisk (GPIO 14, nie-BOOT):
+    // - Szybki dwuklik (<= 400ms) -> Włącza / Wyłącza gniazdo anteny 2.4GHz (GPIO 16)
+    // - Pojedynczy klik -> Przełącza HUD / Launcher UI
+    // - Długie przytrzymanie (> 700ms) -> Zmiana języka
+    if (!botNow && btnBotLast) {
+        btnBotPressMs = now;
+    } else if (botNow && !btnBotLast) {
+        uint32_t held = now - btnBotPressMs;
+        if (held > 700) {
+            currentLang = static_cast<LangID>((static_cast<uint8_t>(currentLang) + 1) % 4);
+            btnBotClickCount = 0;
+        } else if (held > 25) {
+            btnBotClickCount++;
+            if (btnBotClickCount == 1) {
+                btnBotFirstClickMs = now;
+            } else if (btnBotClickCount >= 2 && (now - btnBotFirstClickMs <= 400)) {
+                setReserved24GHzAntenna(localAnt24GState == ANT_24GHZ_ON ? ANT_24GHZ_OFF : ANT_24GHZ_ON);
+                antBannerUntil = now + 1800;
+                logSnapshotToSD();
+                btnBotClickCount = 0;
+            }
+        }
     }
     btnBotLast = botNow;
+
+    if (btnBotClickCount == 1 && (now - btnBotFirstClickMs > 400)) {
+        currentMode = (currentMode == ClusterMode::MODE_DOCKED_CLUSTER)
+                      ? ClusterMode::MODE_STANDALONE_UI
+                      : ClusterMode::MODE_DOCKED_CLUSTER;
+        btnBotClickCount = 0;
+    }
 }
 
 void setup() {
+    // 1. Natychmiastowe podniesienie zasilania płyty i podświetlenia ekranu
     pinMode(PIN_POWER_ON, OUTPUT);
     digitalWrite(PIN_POWER_ON, HIGH);
+    pinMode(PIN_LCD_BL, OUTPUT);
+    digitalWrite(PIN_LCD_BL, HIGH);
+
+    // 2. Bezpieczny start: Gniazdo anteny 2.4GHz fizycznie WYŁĄCZONE (0V na GPIO 16)
     pinMode(PIN_ANTENNA_SW, OUTPUT);
-    setReserved24GHzAntenna(ANT_24GHZ_EXTERNAL);
+    setReserved24GHzAntenna(ANT_24GHZ_OFF);
+
     pinMode(PIN_BTN_TOP, INPUT_PULLUP);
     pinMode(PIN_BTN_BOTTOM, INPUT_PULLUP);
 
     Serial.begin(115200);
-    Serial1.begin(115200, SERIAL_8N1, PIN_TDISPLAY_GROVE_RX, PIN_TDISPLAY_GROVE_TX);
-
     tft.init();
     tft.setRotation(3);
-    tft.setBrightness(220);
+    tft.setBrightness(240);
 
     canvas.setColorDepth(16);
     canvas.createSprite(SCREEN_W, SCREEN_H);
@@ -358,28 +400,13 @@ void setup() {
     if (sdMounted) {
         sdSizeMB = (uint32_t)(SD.cardSize() / (1024ULL * 1024ULL));
         provisionDefaultSDConfigs();
+        protoLoaded = loadEspNowProtocolBin("/protocols/espnow_tdisplay_s3.bin", activeProtoS3);
 
-        bool okS3  = loadEspNowProtocolBin("/protocols/espnow_tdisplay_s3.bin", activeProtoS3);
-        bool ok32U = loadEspNowProtocolBin("/protocols/espnow_esp32_u.bin", activeProtoEsp32U);
-        protoLoaded = (okS3 && ok32U);
-
-        String antCfg = readCfgValue("/config/tdisplay_s3.cfg", "ant_24ghz_mode", "EXT");
-        setReserved24GHzAntenna(antCfg == "INT" ? ANT_24GHZ_INTERNAL : ANT_24GHZ_EXTERNAL);
-
-        int langCfg = readCfgValue("/config/tdisplay_s3.cfg", "language_id", "3").toInt();
-        currentLang = static_cast<LangID>(constrain(langCfg, 0, 3));
-
-        int modeCfg = readCfgValue("/config/tdisplay_s3.cfg", "cluster_mode", "1").toInt();
-        currentMode = (modeCfg == 0) ? ClusterMode::MODE_STANDALONE_UI : ClusterMode::MODE_DOCKED_CLUSTER;
-
-        int wfCfg = readCfgValue("/config/tdisplay_s3.cfg", "waterfall_default", "0").toInt();
-        waterfallMode = (wfCfg == 1);
-
-        int blCfg = readCfgValue("/config/tdisplay_s3.cfg", "lcd_brightness", "220").toInt();
-        tft.setBrightness(constrain(blCfg, 20, 255));
+        String antCfg = readCfgValue("/config/tdisplay_s3.cfg", "ant_24ghz_mode", "OFF");
+        setReserved24GHzAntenna(antCfg == "ON" ? ANT_24GHZ_ON : ANT_24GHZ_OFF);
     }
 
-    if (validateBootSignature()) renderBootSignatureStatic();
+    renderBootSignatureStatic();
 
     WiFi.mode(WIFI_STA);
     WiFi.disconnect();

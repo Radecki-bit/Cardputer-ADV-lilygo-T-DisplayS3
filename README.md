@@ -1,70 +1,41 @@
-# Smolinski | Labs Tactical Cluster OS
+# Smolinski|Labs Dual-MCU Tactical Cluster (`v1.2.0-PRODUCTION`)
 
-**Author:** @whoami (Radek | Smolinski | Labs)  
-**Architecture:** ESP32-S3 (N16R8 - 16MB Flash / 8MB PSRAM)  
-**Target Hardware:** LilyGO T-Display-S3 / M5Stack Cardputer ADV Cluster
-
----
-
-## 🚀 Overview & Design Philosophy
-
-**Tactical Cluster OS** is a high-performance, custom-tailored embedded operating system designed specifically for portable ESP32-S3 security and mesh nodes. Built around a striking **CyberNeon aesthetic** and a practical field-operable architecture, the system is optimized for responsive local control, realtime telemetry, and resilient off-grid wireless operations.
-
-The firmware is structured as a dual-core FreeRTOS environment, with display rendering and fast UI response separated from system intelligence, wireless scanning, and telemetry processing.
+**Author:** R. Smoliński (`@whoami`) | CEO Smolinski|Labs  
+**Targets:** M5Stack Cardputer ADV (Master Windows XP Luna OS) + LilyGO T-Display-S3 (Tactical HUD)
 
 ---
 
-## 📹 Video Showcases & Field Tests (TikTok)
+## 1. Sterowanie i Skróty Klawiszowe (M5Stack Cardputer ADV)
 
-Follow live hardware builds, RF/LoRa mesh tests, and firmware updates on TikTok:  
-👉 **[Official TikTok Profile — Smolinski | Labs (@whoami)](https://www.tiktok.com)**
-
----
-
-## ⚡ Key Features
-
-* **Dual-Core FreeRTOS Engine:** Dedicated GUI DMA rendering on Core 1 and cluster compute / telemetry / Wi-Fi scanning on Core 0.
-* **SDF CyberNeon Rasterizer:** Pre-rendered RGB565 tile assets with Gaussian-style neon glows, dynamic hot-spot borders, and real-time dithered gradients.
-* **Immutable Boot Signature:** Custom grunge **LAUNCHER** boot sequence with digital glitch effects and integrity checks on boot.
-* **Dynamic Grid & Module Management:** Active 8-tile desktop supporting live module uninstallation with automatic shifting and second-page expansion preparation.
-* **Tactical Stealth Mode:** Multi-stage display backlight and hardware LED dimming (`100%` → `45%` → `10% Night` → `0% Stealth Blackout`).
-* **Hardware Antenna Switching:** Control over the external 2.4GHz u.FL/IPEX RF front-end.
-* **Software Soft Reboot:** Instant in-system reboot triggered directly from the settings menu to loop the boot splash without touching physical bootloaders.
+| Klawisz / Akcja | Funkcja w systemie Windows XP Luna |
+| :--- | :--- |
+| **`Fn` + Strzałki (`;` `.` `,` `/`)** | Poruszanie kursorem myszy po ekranie (działa również bezpośrednio bez `Fn` na pulpicie) |
+| **`Enter`** | Kliknięcie kursorem w przycisk **`[X]`** (zamyka okno), ikonę **Rekina Bruce**, przycisk **`[start]`** lub opcję w Menu Start |
+| **`[M]`** | Otwarcie / Zamknięcie Menu Start (`@whoami \| CEO`) |
+| **`[W]`** | Minimalizacja / Przywrócenie okna oscyloskopu `Hydra RF` |
+| **`[1]` / `[2]`** | Przełączenie układu radiowego: `1 = CC1101 Sub-GHz` / `2 = nRF24 2.4GHz` |
+| **`[3]` / `[F]`** | Przełączenie częstotliwości Sub-GHz: `433.92 MHz <-> 868.35 MHz` |
+| **`[4]`** | Przełączenie trybu pracy: `SPECTRUM <-> SNIFFER <-> STANDBY` |
+| **`[5]` / `[A]`** | **Fizyczne Włączenie / Wyłączenie gniazda anteny 2.4GHz (`OFF <-> ON`)** |
+| **`[6]` / `[B]`** | Przełączenie systemu do **Bruce Firmware** z karty SD (`/firmware/bruce.bin` lub `/bruce.bin`) |
+| **`[S]`** | Zapis logu telemetrii RF na kartę SD (`/hydra_rf.log`) |
 
 ---
 
-## 🛠️ System Modules
+## 2. Sterowanie i Bezpieczny Włącznik Anteny 2.4GHz (LilyGO T-Display-S3)
 
-1. **WIFI SCANNER:** Real-time 2.4GHz spectrum auditing and SSID enumeration.
-2. **BLUETOOTH:** BLE 5.0 controller and advertising packet scanner.
-3. **MESH LORA:** 868 MHz SPI transceiver link handler for off-grid mesh nodes.
-4. **GEMINI AI:** Air-gapped serial bridge for local LLM agent communication.
-5. **MICROPYTHON:** Integrated v1.22 runtime and REPL terminal interface.
-6. **FLASH SYS:** Live storage telemetry, 16MB QIO mapping, and free PSRAM gauges.
-7. **OTA UPDATE:** Secure local firmware update channel.
-8. **SETTINGS:** System configuration, brightness controls, manual clock sync, and soft reboot.
+Gniazdo zewnętrznej anteny 2.4GHz (`GPIO 16`) jest **domyślnie fizycznie wyłączone (`0V / OFF`)** przy każdym starcie systemu, co pozwala na bezpieczne podłączenie anteny na stałe.
 
----
-
-## ⚙️ Build & Flash (PlatformIO)
-
-To compile and upload the firmware to your LilyGO T-Display-S3:
-
-```bash
-pio run --target upload
-```
-
-This project is configured for PlatformIO and expects the ESP32-S3 toolchain and target board definitions to be available in the local environment.
+| Przycisk na T-Display-S3 | Akcja | Funkcja |
+| :--- | :--- | :--- |
+| **Górny/Drugi Przycisk (`GPIO 14` - nie-BOOT)** | **Szybki Dwuklik (`2x Klik`)** | **Fizyczne Włączenie / Wyłączenie napięcia gniazda anteny 2.4GHz (`ON <-> OFF`)** |
+| **Górny/Drugi Przycisk (`GPIO 14`)** | Pojedynczy Klik | Przełączenie widoku: `Tactical Spectrum HUD <-> 8-Tile Launcher` |
+| **Górny/Drugi Przycisk (`GPIO 14`)** | Przytrzymanie (`> 0.7 s`) | Zmiana języka interfejsu (`PL / EN / DE / RU`) |
+| **Dolny Przycisk (`GPIO 0` - BOOT)** | Pojedynczy Klik | Przełączenie wykresu: `Spectrum Analyzer <-> Waterfall` |
 
 ---
 
-## 🧩 Repository Highlights
-
-* **Firmware-first design:** purpose-built for embedded systems and low-level hardware control.
-* **Graphics-rich UI:** custom neon raster assets and optimized display rendering.
-* **Field-oriented features:** mesh networking, scanning, OTA updates, and diagnostics.
-* **Security-oriented boot flow:** immutable startup checks and custom partitioning for a hardened deployment model.
-
----
-
-*(c) 2026 Smolinski | Labs. All rights reserved.*
+## 3. Pliki Binarne (`releases/` oraz `sd_card_root/`)
+* **`SmolinskiLabs_Cardputer_ADV.bin`** — Obraz pod M5Launcher / kartę SD dla M5Stack Cardputer ADV.
+* **`SmolinskiLabs_TDisplay_S3.bin`** — Obraz aplikacji (`0x10000`) pod M5Launcher dla LilyGO T-Display-S3.
+* **`SmolinskiLabs_TDisplay_S3_FULL_0x0.bin`** — Pełny scalony obraz fabryczny (`bootloader + partitions + app`) do bezpośredniego wgrywania przez Web Flasher (**ESP Terminator**) pod adres **`0x0000`**.
