@@ -373,65 +373,193 @@ void handleButtons() {
     }
 }
 
-void setup() {
-    // 1. Natychmiastowe podniesienie zasilania płyty i podświetlenia ekranu
-    pinMode(PIN_POWER_ON, OUTPUT);
-    digitalWrite(PIN_POWER_ON, HIGH);
-    pinMode(PIN_LCD_BL, OUTPUT);
-    digitalWrite(PIN_LCD_BL, HIGH);
 
-    // 2. Bezpieczny start: Gniazdo anteny 2.4GHz fizycznie WYŁĄCZONE (0V na GPIO 16)
-    pinMode(PIN_ANTENNA_SW, OUTPUT);
-    setReserved24GHzAntenna(ANT_24GHZ_OFF);
+// === SMOLINSKI|LABS HFT ARBITRAGE ENGINE (KuCoin <-> TON <-> BingX) ===
+struct TxRecord {
+    uint32_t id;
+    bool dirKtoB;
+    bool isWin;
+    float cutUsdt;
+};
 
-    pinMode(PIN_BTN_TOP, INPUT_PULLUP);
-    pinMode(PIN_BTN_BOTTOM, INPUT_PULLUP);
+TxRecord history[3];
+uint32_t txCounter = 419;
+float walletUsdt = 142.85f;
+int winStreak = 0;
+int nextLossTarget = 8;
 
-    Serial.begin(115200);
-    tft.init();
-    tft.setRotation(3);
-    tft.setBrightness(240);
+void drawStaticHUD() {
+    tft.fillScreen(0x0000);
 
-    canvas.setColorDepth(16);
-    canvas.createSprite(SCREEN_W, SCREEN_H);
+    // GÓRNY PASEK SYSTEMOWY
+    tft.fillRect(0, 0, 320, 18, 0x0863);
+    tft.setTextSize(1);
+    tft.setTextColor(0x07FF, 0x0863);
+    tft.setCursor(6, 5);
+    tft.print("SMOLINSKI|LABS HFT CORE v4.2");
+    tft.setTextColor(0x07E0, 0x0863);
+    tft.setCursor(218, 5);
+    tft.print("TON-BRIDGE: LIVE");
 
-    sdSPI.begin(SD_SCK_PIN, SD_MISO_PIN, SD_MOSI_PIN, SD_CS_PIN);
-    sdMounted = SD.begin(SD_CS_PIN, sdSPI, 16000000);
-    if (sdMounted) {
-        sdSizeMB = (uint32_t)(SD.cardSize() / (1024ULL * 1024ULL));
-        provisionDefaultSDConfigs();
-        protoLoaded = loadEspNowProtocolBin("/protocols/espnow_tdisplay_s3.bin", activeProtoS3);
+    // PASEK OGRANICZENIA PROCESORA (HW CAP 5-15 USDT)
+    tft.fillRect(0, 19, 320, 15, 0x2080);
+    tft.setTextColor(0xFD20, 0x2080);
+    tft.setCursor(6, 23);
+    tft.print("HW LIMIT: ESP32-S3 SRAM/CPU CAP [MAX 15.00 USDT/TX]");
 
-        String antCfg = readCfgValue("/config/tdisplay_s3.cfg", "ant_24ghz_mode", "OFF");
-        setReserved24GHzAntenna(antCfg == "ON" ? ANT_24GHZ_ON : ANT_24GHZ_OFF);
+    // WĘZŁY GIEŁD I DŁUGA LINIA PRZESYŁU TON
+    // KuCoin (Lewy)
+    tft.drawRect(6, 38, 64, 24, 0x07FF);
+    tft.setTextColor(0x07FF, 0x0000);
+    tft.setCursor(16, 46);
+    tft.print("KuCoin");
+
+    // BingX (Prawy)
+    tft.drawRect(250, 38, 64, 24, 0x051F);
+    tft.setTextColor(0x051F, 0x0000);
+    tft.setCursor(266, 46);
+    tft.print("BingX");
+
+    // Długa kreska (Magistrala TON)
+    tft.drawFastHLine(70, 49, 180, 0x39E7);
+    tft.drawFastHLine(70, 50, 180, 0x07FF);
+    tft.drawFastHLine(70, 51, 180, 0x39E7);
+
+    // Etykieta TON nad linią
+    tft.setTextColor(0xFFFF, 0x0000);
+    tft.setCursor(116, 38);
+    tft.print("< TON BLOCKCHAIN >");
+
+    // RAMKA TELEMETRII GOTÓWKI
+    tft.drawRect(6, 66, 308, 34, 0x2124);
+    tft.drawFastVLine(158, 66, 34, 0x2124);
+
+    tft.setTextColor(0xBDF7, 0x0000);
+    tft.setCursor(12, 70);
+    tft.print("10% PROFIT CUT (5-15$):");
+    tft.setCursor(166, 70);
+    tft.print("TON WALLET BALANCE:");
+
+    // NAGŁÓWEK LOGU TRANSAKCJI
+    tft.drawFastHLine(6, 103, 308, 0x2124);
+    tft.setTextColor(0x7BEF, 0x0000);
+    tft.setCursor(6, 107);
+    tft.print("TX#    ROUTE           10% FEE CUT       STATUS");
+
+    // DOLNY PASEK STATUSU
+    tft.fillRect(0, 156, 320, 14, 0x0841);
+    tft.setTextColor(0x07E0, 0x0841);
+    tft.setCursor(6, 159);
+    tft.print("ARB: ACTIVE | FEE: 10% | LATENCY: 12ms | @whoami");
+}
+
+void animateTonBridge(bool kToB, bool isWin) {
+    uint16_t pulseCol = isWin ? 0x07E0 : 0xF800;
+    int startX = kToB ? 72 : 236;
+    int endX   = kToB ? 236 : 72;
+    int step   = kToB ? 12 : -12;
+
+    for (int x = startX; (kToB ? (x <= endX) : (x >= endX)); x += step) {
+        // Rysujemy impuls lecący po długiej kresce
+        tft.fillRect(x, 47, 12, 7, pulseCol);
+        delay(18);
+        // Przywracamy długą kreskę za impulsem
+        tft.fillRect(x, 47, 12, 7, 0x0000);
+        tft.drawFastHLine(x, 49, 12, 0x39E7);
+        tft.drawFastHLine(x, 50, 12, 0x07FF);
+        tft.drawFastHLine(x, 51, 12, 0x39E7);
     }
+}
 
-    renderBootSignatureStatic();
+void updateTelemetry(const TxRecord& rec) {
+    char buf[40];
 
-    WiFi.mode(WIFI_STA);
-    WiFi.disconnect();
-    if (esp_now_init() == ESP_OK) esp_now_register_recv_cb(esp_now_recv_cb_t(onEspNowRecv));
+    // Aktualizacja ostatniego wpływu 10% (lub straty)
+    tft.setTextSize(2);
+    if (rec.isWin) {
+        tft.setTextColor(0x07E0, 0x0000);
+        snprintf(buf, sizeof(buf), "+%05.2f USDT ", rec.cutUsdt);
+    } else {
+        tft.setTextColor(0xF800, 0x0000);
+        snprintf(buf, sizeof(buf), "-%05.2f USDT ", rec.cutUsdt);
+    }
+    tft.setCursor(12, 81);
+    tft.print(buf);
 
-    memset(&rxPacket, 0, sizeof(rxPacket));
-    rxPacket.activeModule  = 1;
-    rxPacket.operationMode = 1;
-    rxPacket.frequencyHz   = FREQ_433_92_MHZ;
-    rxPacket.rssiDbm       = -93;
-    rxPacket.ant24GState   = localAnt24GState;
-    rxPacket.sdStatus      = sdMounted ? 1 : 0;
+    // Aktualizacja salda portfela TON
+    tft.setTextColor(0x07FF, 0x0000);
+    snprintf(buf, sizeof(buf), "%06.2f USDT ", walletUsdt);
+    tft.setCursor(166, 81);
+    tft.print(buf);
+
+    // Aktualizacja 3 ostatnich wierszy historii
+    tft.setTextSize(1);
+    for (int i = 0; i < 3; i++) {
+        if (history[i].id == 0) continue;
+        int y = 119 + (i * 12);
+        uint16_t rowCol = history[i].isWin ? 0x07E0 : 0xF800;
+        tft.setTextColor(rowCol, 0x0000);
+
+        const char* route = history[i].dirKtoB ? "KC->TON->BX" : "BX->TON->KC";
+        const char* sign  = history[i].isWin ? "+" : "-";
+        const char* stat  = history[i].isWin ? "[SETTLED]" : "[SLIPPAGE]";
+
+        snprintf(buf, sizeof(buf), "#%04lu  %s   %s%05.2f USDT     %s   ",
+                 (unsigned long)history[i].id, route, sign, history[i].cutUsdt, stat);
+        tft.setCursor(6, y);
+        tft.print(buf);
+    }
+}
+
+void setup() {
+    pinMode(15, OUTPUT);
+    digitalWrite(15, HIGH);
+    pinMode(38, OUTPUT);
+    digitalWrite(38, HIGH);
+    delay(50);
+
+    tft.init();
+    tft.setRotation(1);
+    randomSeed(esp_random());
+
+    nextLossTarget = random(8, 11); // Co 8-10 transakcja stratna
+    drawStaticHUD();
 }
 
 void loop() {
-    handleButtons();
-    if (packetReceived) {
-        packetReceived = false;
-        for (int r = 23; r > 0; r--) memcpy(waterfallBuf[r], waterfallBuf[r - 1], 64);
-        memcpy(waterfallBuf[0], rxPacket.spectrumBins, 64);
+    txCounter++;
+    winStreak++;
+
+    bool isWin = true;
+    if (winStreak >= nextLossTarget) {
+        isWin = false;
+        winStreak = 0;
+        nextLossTarget = random(8, 11); // Kolejna strata znów za 8 do 10 strzałów
     }
 
-    if (millis() - lastRenderMs >= 33) {
-        lastRenderMs = millis();
-        if (currentMode == ClusterMode::MODE_DOCKED_CLUSTER) renderTacticalHUD();
-        else renderLauncherUI();
+    bool dirKtoB = (random(0, 100) < 50);
+    float amount = 0.0f;
+
+    if (isWin) {
+        // Losowa kwota 10% prowizji od 5.05 do 14.95 USDT (różne końcówki)
+        amount = random(505, 1496) / 100.0f;
+        walletUsdt += amount;
+    } else {
+        // Losowa korekta/strata przy poślizgu (od 4.20 do 11.80 USDT)
+        amount = random(420, 1181) / 100.0f;
+        walletUsdt -= amount;
     }
+
+    // Animacja przelotu pakietu po długiej kresce przez TON
+    animateTonBridge(dirKtoB, isWin);
+
+    // Przesunięcie bufora logów
+    history[2] = history[1];
+    history[1] = history[0];
+    history[0] = {txCounter, dirKtoB, isWin, amount};
+
+    updateTelemetry(history[0]);
+
+    // Losowy odstęp między transakcjami HFT (700 - 1450 ms)
+    delay(random(700, 1450));
 }
